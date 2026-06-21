@@ -1,5 +1,8 @@
 import re
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
 from tiny_rag.chunking import Chunk, SplitterConfig, split, split_parent_child, split_with_diagnostics
 from tiny_rag.chunking.heading import split_heading
@@ -185,6 +188,29 @@ class ChunkingTests(unittest.TestCase):
         self.assertGreaterEqual(len(chunks), 2)
         self.assert_offsets_match(text, chunks)
 
+    def test_heuristic_overlap_boundary_progresses(self):
+        script = """
+from tiny_rag.chunking import SplitterConfig
+from tiny_rag.chunking.heuristic import split_heuristic
+
+text = "a" * 50 + "\\f" + "b" * 60
+chunks = split_heuristic(text, SplitterConfig(chunk_size=100, chunk_overlap=50))
+assert [(chunk.start, chunk.end) for chunk in chunks] == [(0, 50), (50, 111)]
+for chunk in chunks:
+    assert text[chunk.start:chunk.end] == chunk.content
+"""
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+                timeout=2,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("heuristic splitter did not make progress with overlap-aligned boundary")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_form_feed_boundary_is_at_symbol_position(self):
         text = "before\fafter"
         form_feed_pos = text.index("\f")
@@ -291,6 +317,22 @@ class ChunkingTests(unittest.TestCase):
         self.assertGreater(len(result.children), 1)
         self.assertTrue(all(child.parent_index == 0 for child in result.children))
 
+    def test_parent_child_table_context_preserves_child_offsets(self):
+        header = "| Name | Value |\n|---|---|\n"
+        rows = "".join(f"| row{i} | value{i} |\n" for i in range(8))
+        text = header + rows
+        result = split_parent_child(
+            text,
+            SplitterConfig(chunk_size=70, chunk_overlap=0, separators=["\n"], strategy="legacy"),
+            SplitterConfig(chunk_size=40, chunk_overlap=0, separators=["\n"], strategy="legacy"),
+        )
+        self.assertTrue(result.children)
+        for child in result.children:
+            self.assertEqual(text[child.start : child.end], child.content)
+        row_children = [child for child in result.children if "| row" in child.content]
+        self.assertTrue(row_children)
+        self.assertTrue(all(child.context_header == header.strip() for child in row_children))
+
     def test_merge_breadcrumbs_dedupes_parent_tail_against_child_head(self):
         merged = _merge_breadcrumbs("# Doc\n## Install", "  ## Install  \n### Docker")
         self.assertEqual(merged, "# Doc\n## Install\n### Docker")
@@ -307,10 +349,8 @@ class ChunkingTests(unittest.TestCase):
         self.assertGreater(len(chunks), 2)
         later_table_chunks = [chunk for chunk in chunks[1:] if "| row" in chunk.content]
         self.assertTrue(later_table_chunks)
-        self.assertTrue(all(chunk.content.startswith(header) for chunk in later_table_chunks))
-        for chunk in later_table_chunks:
-            original_slice = text[chunk.start : chunk.end]
-            self.assertTrue(chunk.content.endswith(original_slice))
+        self.assertTrue(all(chunk.context_header == header.strip() for chunk in later_table_chunks))
+        self.assert_offsets_match(text, chunks)
 
     def test_legacy_extends_empty_table_header_from_first_data_row(self):
         empty_header = "||\n|---|---|\n"
@@ -323,7 +363,8 @@ class ChunkingTests(unittest.TestCase):
         )
         later_chunks = [chunk for chunk in chunks[1:] if "| a" in chunk.content]
         self.assertTrue(later_chunks)
-        self.assertTrue(all(chunk.content.startswith(inferred_header) for chunk in later_chunks))
+        self.assertTrue(all(chunk.context_header == inferred_header.strip() for chunk in later_chunks))
+        self.assert_offsets_match(text, chunks)
 
     def test_legacy_table_paragraph_break_starts_fresh_header(self):
         first_header = "| A | B |\n|---|---|\n"
@@ -341,8 +382,11 @@ class ChunkingTests(unittest.TestCase):
         )
         second_table_chunks = [chunk for chunk in chunks if "| c" in chunk.content]
         self.assertTrue(second_table_chunks)
-        self.assertTrue(all(chunk.content.startswith(second_header) for chunk in second_table_chunks))
-        self.assertTrue(all(not chunk.content.startswith(first_header) for chunk in second_table_chunks))
+        for chunk in second_table_chunks:
+            self.assertEqual(text[chunk.start : chunk.end], chunk.content)
+            if not chunk.content.startswith(second_header):
+                self.assertEqual(chunk.context_header, second_header.strip())
+            self.assertNotEqual(chunk.context_header, first_header.strip())
 
     def test_legacy_table_column_mismatch_starts_new_header(self):
         first_header = "| A | B |\n|---|---|\n"
@@ -359,8 +403,11 @@ class ChunkingTests(unittest.TestCase):
         )
         second_table_chunks = [chunk for chunk in chunks if "| c" in chunk.content]
         self.assertTrue(second_table_chunks)
-        self.assertTrue(all(chunk.content.startswith(second_header) for chunk in second_table_chunks))
-        self.assertTrue(all(not chunk.content.startswith(first_header) for chunk in second_table_chunks))
+        for chunk in second_table_chunks:
+            self.assertEqual(text[chunk.start : chunk.end], chunk.content)
+            if not chunk.content.startswith(second_header):
+                self.assertEqual(chunk.context_header, second_header.strip())
+            self.assertNotEqual(chunk.context_header, first_header.strip())
 
     def test_header_tracker_returns_headers_by_priority(self):
         tracker = HeaderTracker()

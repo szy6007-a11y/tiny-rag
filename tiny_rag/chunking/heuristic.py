@@ -129,10 +129,12 @@ def _greedy_chunks(text: str, boundaries: List[Boundary], cfg: SplitterConfig) -
             continue
 
         if cur_end - chunk_start >= min_chunk_size:
+            previous_start = chunk_start
             _append_chunk(text, chunk_start, cur_end, chunks)
-            chunk_start = _apply_overlap_aligned(text, cur_end, boundary_positions, cfg)
-            if chunk_start >= cur_end:
-                chunk_start = cur_end
+            overlap_start = _apply_overlap_aligned(text, cur_end, boundary_positions, cfg)
+            if overlap_start <= previous_start or next_end - overlap_start > cfg.chunk_size:
+                overlap_start = cur_end
+            chunk_start = min(overlap_start, cur_end)
             continue
 
         cur_end = next_end

@@ -197,9 +197,11 @@ def _flush_units(text: str, units: List[Unit], chunks: List[Chunk]) -> None:
         return
     start = real_units[0].start
     end = real_units[-1].end
-    content = _units_text(text, units)
+    content = _units_text(text, real_units)
+    synthetic_headers = [unit.text.strip() for unit in units if unit.synthetic and unit.text.strip()]
+    context_header = "\n".join(synthetic_headers)
     if content:
-        chunks.append(Chunk(content=content, start=start, end=end))
+        chunks.append(Chunk(content=content, context_header=context_header, start=start, end=end))
 
 
 def _compute_overlap_units(
