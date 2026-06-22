@@ -205,8 +205,9 @@ npm start
 ```
 
 它支持流式响应、thinking/answer 分离、本地历史和通用 function-calling 执行。
-Python service 侧已经注册了 RAG tools；下一步是把这些工具接进 TUI，形成更完整
-的终端交互体验。
+默认启动时会索引内置本地 KB，并在 TypeScript Agent loop 内注册
+面向用户问答的完整工具 `knowledge_search`。传入一个或多个 `--rag-document`
+参数可以用自己的本地文件替换默认 KB；传 `--no-rag` 则进入纯聊天模式。
 
 ## 项目结构
 

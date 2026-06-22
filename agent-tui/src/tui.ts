@@ -3,6 +3,7 @@ import { AgentEngine } from "./engine.js";
 import { AgentEventBus } from "./events.js";
 import { appendHistory, clearHistory, loadHistory } from "./history.js";
 import { OpenAICompatibleChatClient } from "./chat-client.js";
+import { registerRagTools } from "./rag-tools.js";
 import { ToolRegistry } from "./tool-registry.js";
 import type { AgentContext, Message } from "./types.js";
 import type { RuntimeConfig } from "./config.js";
@@ -15,6 +16,14 @@ interface TranscriptItem {
 }
 
 const ESC = "\x1b[";
+
+function enterAlternateScreen(): void {
+  process.stdout.write(`${ESC}?1049h${ESC}?25l${ESC}2J${ESC}H`);
+}
+
+function leaveAlternateScreen(): void {
+  process.stdout.write(`${ESC}?25h${ESC}?1049l`);
+}
 
 function clearScreen(): void {
   process.stdout.write(`${ESC}?25l${ESC}2J${ESC}H`);
@@ -90,6 +99,9 @@ export class AgentTUI {
   private currentAssistantIndex: number | null = null;
   private currentThoughtIndex: number | null = null;
   private context: AgentContext;
+  private ragEnabled = false;
+  private registeredTools: string[] = [];
+  private alternateScreenActive = false;
 
   constructor(private readonly runtime: RuntimeConfig) {
     this.chatClient = new OpenAICompatibleChatClient({
@@ -105,7 +117,33 @@ export class AgentTUI {
         ...loadHistory(runtime.historyPath, runtime.agentConfig.history_turns),
       ],
     };
+    this.setupRagTools();
     this.attachEvents();
+  }
+
+  private setupRagTools(): void {
+    const result = registerRagTools(this.toolRegistry, this.runtime.ragConfig);
+    this.ragEnabled = result.enabled;
+    this.registeredTools = result.tools;
+    if (result.knowledgeBase) {
+      const existing = new Set(this.context.knowledge_bases.map((kb) => kb.id));
+      if (!existing.has(result.knowledgeBase.id)) {
+        this.context.knowledge_bases.push(result.knowledgeBase);
+      }
+    }
+    if (result.selectedDocuments.length > 0) {
+      const existing = new Set(this.context.selected_documents.map((doc) => doc.knowledge_id));
+      for (const doc of result.selectedDocuments) {
+        if (!existing.has(doc.knowledge_id)) {
+          this.context.selected_documents.push(doc);
+        }
+      }
+    }
+    if (this.ragEnabled && result.knowledgeBase) {
+      this.runtime.agentConfig.knowledge_bases = [result.knowledgeBase.id];
+      this.runtime.agentConfig.knowledge_ids = result.selectedDocuments.map((doc) => doc.knowledge_id);
+      this.runtime.agentConfig.allowed_tools = this.registeredTools;
+    }
   }
 
   private attachEvents(): void {
@@ -144,7 +182,15 @@ export class AgentTUI {
       this.render();
     });
 
-    this.eventBus.on("tool_result", ({ tool_name, success, error }) => {
+    this.eventBus.on("tool_result", ({ tool_name, success, error, data }) => {
+      if (data?.unavailable_tool) {
+        this.transcript.push({
+          role: "status",
+          content: `Tool skipped: ${tool_name} is not available in this session`,
+        });
+        this.render();
+        return;
+      }
       this.transcript.push({
         role: success ? "status" : "error",
         content: success ? `Tool completed: ${tool_name}` : `Tool failed: ${tool_name}: ${error ?? ""}`,
@@ -225,7 +271,7 @@ export class AgentTUI {
       case "/model":
         this.transcript.push({
           role: "system",
-          content: `model=${this.runtime.model}\nbase_url=${this.runtime.baseURL}\nhistory=${this.runtime.historyPath}\ntools=0`,
+          content: `model=${this.runtime.model}\nbase_url=${this.runtime.baseURL}\nhistory=${this.runtime.historyPath}\nrag=${this.ragEnabled ? "enabled" : "disabled"}\ntools=${this.registeredTools.length}${this.registeredTools.length ? ` (${this.registeredTools.join(", ")})` : ""}`,
         });
         break;
       case "/context":
@@ -299,9 +345,12 @@ export class AgentTUI {
     const bodyHeight = Math.max(5, height - headerHeight - footerHeight);
 
     clearScreen();
-    const title = ` Tiny RAG Agent TUI | model ${this.runtime.model} | tools 0 | ${this.busy ? "running" : "ready"} `;
+    const title = ` Tiny RAG Agent TUI | model ${this.runtime.model} | tools ${this.registeredTools.length} | ${this.busy ? "running" : "ready"} `;
     process.stdout.write(color(1, truncateVisible(title, width)) + "\n");
-    process.stdout.write(color(90, padRight("Pure Agent core, no built-in tools. Commands: /help /quit", width)) + "\n");
+    const modeLine = this.ragEnabled
+      ? `RAG enabled: ${this.context.selected_documents.length} document(s). Commands: /help /quit`
+      : "Pure Agent core, no RAG tools. Pass --rag-document <file> to enable retrieval.";
+    process.stdout.write(color(90, padRight(modeLine, width)) + "\n");
     process.stdout.write(color(90, "-".repeat(width)) + "\n");
 
     const lines = this.renderTranscript(width, bodyHeight);
@@ -341,30 +390,61 @@ export class AgentTUI {
     }
   };
 
+  private onResize = () => {
+    this.render();
+  };
+
+  private onProcessExit = () => {
+    this.restoreTerminal();
+  };
+
+  private onSignal = () => {
+    this.close(0);
+  };
+
   run(): void {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       throw new Error("TUI requires an interactive terminal");
     }
 
+    enterAlternateScreen();
+    this.alternateScreenActive = true;
     readline.emitKeypressEvents(process.stdin);
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.on("keypress", this.onKeypress);
-    process.stdout.on("resize", () => this.render());
+    process.stdout.on("resize", this.onResize);
+    process.once("exit", this.onProcessExit);
+    process.once("SIGTERM", this.onSignal);
+    process.once("SIGHUP", this.onSignal);
     this.transcript.push({
       role: "system",
-      content: `Started. History: ${this.runtime.historyPath}\nNo tools are registered in this build.`,
+      content: this.ragEnabled
+        ? `Started. History: ${this.runtime.historyPath}\nRAG tools registered: ${this.registeredTools.join(", ")}\nIndexed documents: ${this.context.selected_documents.map((doc) => doc.title || doc.file_name || doc.knowledge_id).join(", ")}`
+        : `Started. History: ${this.runtime.historyPath}\nNo RAG tools are registered. Pass --rag-document <file> to enable local retrieval.`,
     });
     this.render();
   }
 
-  close(): void {
+  private restoreTerminal(): void {
+    process.stdin.off("keypress", this.onKeypress);
+    process.stdout.off("resize", this.onResize);
+    process.off("exit", this.onProcessExit);
+    process.off("SIGTERM", this.onSignal);
+    process.off("SIGHUP", this.onSignal);
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    if (this.alternateScreenActive) {
+      this.alternateScreenActive = false;
+      leaveAlternateScreen();
+      return;
+    }
+    showCursor();
+  }
+
+  close(exitCode = 0): void {
     if (this.closed) return;
     this.closed = true;
-    process.stdin.off("keypress", this.onKeypress);
-    if (process.stdin.isTTY) process.stdin.setRawMode(false);
-    showCursor();
-    process.stdout.write(`${ESC}2J${ESC}H`);
-    process.exit(0);
+    this.restoreTerminal();
+    process.exit(exitCode);
   }
 }

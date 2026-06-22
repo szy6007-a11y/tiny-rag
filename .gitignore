@@ -13,3 +13,4 @@ dist/
 build/
 *.egg-info/
 tmp/
+.agent-tui-rag.sqlite*

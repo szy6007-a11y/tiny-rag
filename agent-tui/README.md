@@ -2,7 +2,10 @@
 
 Standalone TypeScript TUI for the Agent core loop.
 
-This package is self-contained. The first build registers no tools, so it runs as a pure conversational Agent while keeping the same core shape:
+This package is self-contained. By default it starts in Agent Q&A mode with a
+local knowledge base already bound. On startup it indexes the bundled default KB
+through the Python Tiny RAG stack and registers the core RAG tool in the
+TypeScript function-calling loop.
 
 - system prompt construction
 - runtime context block
@@ -10,7 +13,8 @@ This package is self-contained. The first build registers no tools, so it runs a
 - streaming answer/thinking separation
 - ReAct loop stop conditions
 - OpenAI-compatible chat streaming
-- function-calling protocol support with an empty registry
+- function-calling protocol support
+- local RAG tools backed by Python Tiny RAG
 
 The prompt template is vendored locally:
 
@@ -27,10 +31,28 @@ npm run verify:prompts
 npm start
 ```
 
-Optional:
+This opens the TUI with the default KB and the core RAG tool registered.
+
+Optional context/history override:
 
 ```bash
 npm start -- --context examples/context.json --history .agent-tui-history.jsonl
+```
+
+Use your own local document(s) instead of the bundled default KB:
+
+```bash
+npm run dev -- \
+  --rag-document /path/to/manual.md
+```
+
+Repeat `--rag-document` to bind multiple local files. Startup rebuilds the
+local SQLite index at `.agent-tui-rag.sqlite` by default.
+
+Start pure chat mode without a KB:
+
+```bash
+npm start -- --no-rag
 ```
 
 ## Environment
@@ -72,6 +94,14 @@ This checks:
 /quit
 ```
 
-## Current Tool State
+## RAG Tool Mode
 
-No tools are defined or registered in this build. The generic `ToolRegistry` and function-calling plumbing are present so concrete tools can be injected later without changing the Agent core.
+By default, the TUI registers only the complete user-facing Q&A tool:
+
+- `knowledge_search`
+
+The bridge uses the existing Python service/tool registry and a local hash
+embedder plus lexical reranker, so document retrieval does not require separate
+embedding or rerank API keys. Python-side helper tools such as `grep_chunks`,
+`list_knowledge_chunks`, and `get_document_info` remain available in the service
+layer, but they are not exposed in the default TUI Agent surface.

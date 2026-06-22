@@ -1,3 +1,4 @@
 node_modules/
 dist/
 .agent-tui-history.jsonl
+.agent-tui-rag.sqlite*

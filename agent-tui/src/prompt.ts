@@ -161,7 +161,7 @@ function formatSelectedDocuments(docs: SelectedDocumentInfo[]): string {
     "",
     "### User Selected Documents (via @ mention)",
     "The user has explicitly selected the following documents. **You should prioritize searching and retrieving information from these documents when answering.**",
-    "Use `list_knowledge_chunks` with the provided Knowledge IDs to fetch their content.",
+    "Use the available retrieval tool and include the selected document titles in your search intent when you need their content.",
     "",
     "| # | Document Name | Type | Knowledge ID |",
     "|---|---------------|------|---------------|",
@@ -240,7 +240,7 @@ export function buildRuntimeContextBlock(
   }
 
   lines.push(
-    '  <communication_instruction>Do not use internal tool names or identifiers in your answers or in Thought. Say "keyword retrieval" instead of grep_chunks, "semantic retrieval" instead of knowledge_search, "browse full document" instead of list_knowledge_chunks; likewise never expose chunk_id, knowledge_id, or other internal IDs—refer to documents by title or name.</communication_instruction>',
+    "  <communication_instruction>Do not use internal tool names or identifiers in your answers or in Thought. Describe retrieval in natural language, and never expose chunk_id, knowledge_id, knowledge_base_id, or other internal IDs; refer to documents by title or name.</communication_instruction>",
   );
   lines.push(
     "  <answer_instruction>When you have gathered enough information, write your complete user-facing answer as your reply and stop—do not request any more tools in that final message. Until then, keep using tools; do not give a partial answer mid-investigation.</answer_instruction>",

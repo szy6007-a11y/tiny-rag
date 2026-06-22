@@ -208,9 +208,10 @@ npm start
 ```
 
 It supports streaming responses, thinking/answer separation, persisted local
-history, and generic function-calling execution. The Python service already
-registers the RAG tools; wiring those tools into the TUI is the next UI
-integration step.
+history, and generic function-calling execution. By default it indexes the
+bundled local KB and registers the complete user-facing `knowledge_search` tool
+inside the TUI loop. Pass one or more `--rag-document` arguments to replace the
+default KB with your own local files, or `--no-rag` for pure chat mode.
 
 ## Project Layout
 

@@ -15,6 +15,10 @@ export class ToolRegistry {
     return [...this.tools.keys()].sort();
   }
 
+  hasTool(name: string): boolean {
+    return this.tools.has(name);
+  }
+
   getFunctionDefinitions(): ChatTool[] {
     return this.listTools().map((name) => {
       const tool = this.tools.get(name);

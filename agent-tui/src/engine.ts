@@ -124,7 +124,7 @@ export class AgentEngine {
       temperature: this.config.temperature,
       tools,
       thinking: this.config.thinking,
-      parallel_tool_calls: true,
+      parallel_tool_calls: this.config.parallel_tool_calls ?? false,
     };
 
     for await (const chunk of this.chatModel.chatStream(messages, opts)) {
@@ -174,6 +174,8 @@ export class AgentEngine {
     const splitter = new ThinkStreamSplitter();
     let thinkingOpen = false;
     let answerStreamed = false;
+    let deferredAnswer = "";
+    const shouldDeferAnswer = tools.length > 0;
 
     const emitThought = (content: string, done: boolean) => {
       if (!content && !done) return;
@@ -195,19 +197,16 @@ export class AgentEngine {
       this.eventBus.emit("answer", { content, done: false });
     };
 
-    const llmResult = await this.streamLLMToEventBus(messages, tools, (chunk) => {
-      if (chunk.response_type === "tool_call" && chunk.data) {
-        const toolCallID = String(chunk.data.tool_call_id ?? "");
-        const toolName = String(chunk.data.tool_name ?? "");
-        if (toolCallID && toolName) {
-          this.eventBus.emit("tool_call", {
-            tool_call_id: toolCallID,
-            tool_name: toolName,
-            iteration,
-          });
-        }
+    const collectAnswer = (content: string) => {
+      if (!content) return;
+      if (shouldDeferAnswer) {
+        deferredAnswer += content;
+        return;
       }
+      emitAnswer(content);
+    };
 
+    const llmResult = await this.streamLLMToEventBus(messages, tools, (chunk) => {
       if (chunk.response_type === "thinking") {
         if (chunk.content) {
           thinkingOpen = true;
@@ -224,7 +223,7 @@ export class AgentEngine {
           thinkingOpen = true;
           emitThought(think, false);
         }
-        emitAnswer(answer);
+        collectAnswer(answer);
       }
 
       if (chunk.done) {
@@ -233,12 +232,25 @@ export class AgentEngine {
           thinkingOpen = true;
           emitThought(think, false);
         }
-        emitAnswer(answer);
-        closeThinking();
+        collectAnswer(answer);
       }
     });
 
     const finishReason = llmResult.finishReason || "stop";
+    const hasToolCalls = llmResult.toolCalls.length > 0 || finishReason === "tool_calls";
+    if (deferredAnswer) {
+      if (hasToolCalls) {
+        thinkingOpen = true;
+        emitThought(deferredAnswer, false);
+        closeThinking();
+      } else {
+        emitAnswer(deferredAnswer);
+        closeThinking();
+      }
+    } else {
+      closeThinking();
+    }
+
     const response: ChatResponse = {
       content: stripThinkBlocks(llmResult.content),
       reasoning_content: llmResult.reasoningContent,
@@ -321,6 +333,40 @@ export class AgentEngine {
 
     const run = async (tc: LLMToolCall, index: number): Promise<ExecutedToolCall> => {
       const id = tc.id || `${tc.function.name}-${index}`;
+      const toolName = tc.function.name;
+
+      if (!this.toolRegistry.hasTool(toolName)) {
+        const availableTools = this.toolRegistry.listTools();
+        const output = `The requested tool "${toolName}" is not available in this session. Available tool(s): ${availableTools.join(", ") || "none"}. Use only the available tool list.`;
+        this.eventBus.emit("tool_call", {
+          tool_call_id: id,
+          tool_name: toolName,
+          arguments: {},
+          iteration,
+        });
+        this.eventBus.emit("tool_result", {
+          tool_call_id: id,
+          tool_name: toolName,
+          output,
+          success: true,
+          duration: 0,
+          iteration,
+          data: { unavailable_tool: true, available_tools: availableTools },
+        });
+        return {
+          id,
+          name: toolName,
+          args: {},
+          duration: 0,
+          provider_metadata: tc.provider_metadata,
+          result: {
+            success: true,
+            output,
+            data: { unavailable_tool: true, available_tools: availableTools },
+          },
+        };
+      }
+
       let args: Record<string, unknown>;
       try {
         args = parseJSONRecord(tc.function.arguments || "{}");
@@ -328,7 +374,7 @@ export class AgentEngine {
         const message = error instanceof Error ? error.message : String(error);
         return {
           id,
-          name: tc.function.name,
+          name: toolName,
           args: { _raw: tc.function.arguments },
           duration: 0,
           provider_metadata: tc.provider_metadata,
@@ -342,18 +388,18 @@ export class AgentEngine {
 
       this.eventBus.emit("tool_call", {
         tool_call_id: id,
-        tool_name: tc.function.name,
+        tool_name: toolName,
         arguments: args,
         iteration,
       });
 
       const started = Date.now();
-      const result = await this.toolRegistry.executeTool(tc.function.name, args);
+      const result = await this.toolRegistry.executeTool(toolName, args);
       const duration = Date.now() - started;
 
       this.eventBus.emit("tool_result", {
         tool_call_id: id,
-        tool_name: tc.function.name,
+        tool_name: toolName,
         output: result.output,
         error: result.error,
         success: result.success,
@@ -364,7 +410,7 @@ export class AgentEngine {
 
       return {
         id,
-        name: tc.function.name,
+        name: toolName,
         args,
         result,
         duration,
