@@ -38,12 +38,15 @@ SplitParentChild(text string, parentCfg SplitterConfig, childCfg SplitterConfig)
 
 ```go
 type SplitterConfig struct {
-    ChunkSize    int
-    ChunkOverlap int
-    Separators   []string
-    Strategy     string // auto / heading / heuristic / legacy / recursive
-    TokenLimit   int
-    Languages    []string
+    ChunkSize       int
+    ChunkOverlap    int
+    Separators      []string
+    Strategy        string // auto / heading / heuristic / legacy / recursive
+    TokenLimit      int
+    Languages       []string
+    ParentChild     bool
+    ParentChunkSize int
+    ChildChunkSize  int
 }
 ```
 
@@ -53,6 +56,9 @@ type SplitterConfig struct {
 - `ChunkOverlap = 80`
 - `Separators = []string{"\n\n", "\n", "。"}`
 - `Strategy = ""` 时按 `legacy` 处理；只有显式 `"auto"` 才 profile 路由
+- `ParentChild = false`
+- `ParentChunkSize = 4096`
+- `ChildChunkSize = 384`
 
 ### 输出
 

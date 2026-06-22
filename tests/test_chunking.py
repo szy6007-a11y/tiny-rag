@@ -4,7 +4,14 @@ import sys
 import unittest
 from pathlib import Path
 
-from tiny_rag.chunking import Chunk, SplitterConfig, split, split_parent_child, split_with_diagnostics
+from tiny_rag.chunking import (
+    Chunk,
+    ParentChildResult,
+    SplitterConfig,
+    split,
+    split_parent_child,
+    split_with_diagnostics,
+)
 from tiny_rag.chunking.heading import split_heading
 from tiny_rag.chunking.heuristic import _find_boundaries, split_heuristic
 from tiny_rag.chunking.legacy import HeaderTracker, HeaderTrackerHook, split_legacy
@@ -38,6 +45,15 @@ class ChunkingTests(unittest.TestCase):
     def test_overlap_is_capped_to_half_chunk_size(self):
         cfg = SplitterConfig(chunk_size=101, chunk_overlap=100).normalized()
         self.assertEqual(cfg.chunk_overlap, 50)
+
+    def test_parent_child_overlap_uses_child_size_for_config_cap(self):
+        cfg = SplitterConfig(
+            chunk_size=100,
+            chunk_overlap=800,
+            parent_child=True,
+            child_chunk_size=1000,
+        ).normalized()
+        self.assertEqual(cfg.chunk_overlap, 500)
 
     def test_embedding_content_trims_body(self):
         self.assertEqual(Chunk(" \n body \n ").embedding_content(), "body")
@@ -292,6 +308,27 @@ for chunk in chunks:
             if child.parent_index != -1:
                 self.assertGreaterEqual(child.parent_index, 0)
                 self.assertLess(child.parent_index, len(result.parents))
+            self.assertEqual(text[child.start : child.end], child.content)
+
+    def test_split_uses_parent_child_config_flag(self):
+        text = ("alpha beta gamma\n\n" * 20).strip() + "\n"
+        cfg = SplitterConfig(
+            parent_child=True,
+            parent_chunk_size=1000,
+            child_chunk_size=60,
+            chunk_overlap=0,
+            strategy="legacy",
+        )
+
+        result, diagnostics = split_with_diagnostics(text, cfg)
+
+        self.assertIsInstance(split(text, cfg), ParentChildResult)
+        self.assertIsInstance(result, ParentChildResult)
+        self.assertEqual(diagnostics.selected_tier, "parent_child")
+        self.assertEqual(diagnostics.tier_chain, ["parent_child"])
+        self.assertEqual(len(result.parents), 1)
+        self.assertGreater(len(result.children), 1)
+        for child in result.children:
             self.assertEqual(text[child.start : child.end], child.content)
 
     def test_parent_child_omits_unsplit_parent(self):

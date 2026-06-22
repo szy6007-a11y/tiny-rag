@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tiny_rag.chunking import SplitterConfig, split_parent_child, split_with_diagnostics
+from tiny_rag.chunking import ParentChildResult, SplitterConfig, split_with_diagnostics
 
 
 def main() -> int:
@@ -23,9 +23,6 @@ def main() -> int:
     parser.add_argument("--separator", action="append", dest="separators", help="Override separators; repeatable")
     parser.add_argument("--language", action="append", dest="languages", default=[])
     parser.add_argument("--token-limit", type=int, default=0)
-    parser.add_argument("--parent-child", action="store_true", help="Preview parent-child chunking")
-    parser.add_argument("--parent-size", type=int, default=4096)
-    parser.add_argument("--child-size", type=int, default=384)
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     parser.add_argument("--show-full", action="store_true", help="Print full chunk content")
     parser.add_argument("--max-preview", type=int, default=160)
@@ -42,26 +39,8 @@ def main() -> int:
         languages=args.languages,
     )
 
-    if args.parent_child:
-        result = split_parent_child(
-            text,
-            SplitterConfig(
-                chunk_size=args.parent_size,
-                chunk_overlap=args.chunk_overlap,
-                separators=args.separators or [],
-                strategy=args.strategy,
-                token_limit=args.token_limit,
-                languages=args.languages,
-            ),
-            SplitterConfig(
-                chunk_size=args.child_size,
-                chunk_overlap=args.chunk_overlap,
-                separators=args.separators or [],
-                strategy=args.strategy,
-                token_limit=args.token_limit,
-                languages=args.languages,
-            ),
-        )
+    result, diagnostics = split_with_diagnostics(text, cfg)
+    if isinstance(result, ParentChildResult):
         if args.json:
             print(json.dumps(_to_plain(result), ensure_ascii=False, indent=2))
         else:
@@ -72,7 +51,7 @@ def main() -> int:
             _print_chunks(result.children, text, args, include_parent=True)
         return 0
 
-    chunks, diagnostics = split_with_diagnostics(text, cfg)
+    chunks = result
     if args.json:
         print(
             json.dumps(

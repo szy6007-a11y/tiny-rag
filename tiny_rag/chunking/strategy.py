@@ -1,25 +1,42 @@
 from __future__ import annotations
 
-from typing import List, Tuple
+from dataclasses import replace
+from typing import List, Tuple, Union
 
 from .heading import split_heading
 from .heuristic import split_heuristic
 from .legacy import split_legacy
 from .profile import profile_document, select_strategy
-from .types import ChildChunk, Chunk, Diagnostics, ParentChildResult, RejectedTier, SplitterConfig
+from .types import (
+    DEFAULT_CHILD_CHUNK_SIZE,
+    DEFAULT_PARENT_CHUNK_SIZE,
+    ChildChunk,
+    Chunk,
+    Diagnostics,
+    ParentChildResult,
+    RejectedTier,
+    SplitterConfig,
+)
 from .utils import assign_sequence
 
 
-def split(text: str, cfg: SplitterConfig = None) -> List[Chunk]:
-    chunks, _ = split_with_diagnostics(text, cfg or SplitterConfig())
-    return chunks
+SplitResult = Union[List[Chunk], ParentChildResult]
+
+
+def split(text: str, cfg: SplitterConfig = None) -> SplitResult:
+    result, _ = split_with_diagnostics(text, cfg or SplitterConfig())
+    return result
 
 
 def split_with_diagnostics(
     text: str,
     cfg: SplitterConfig = None,
-) -> Tuple[List[Chunk], Diagnostics]:
+) -> Tuple[SplitResult, Diagnostics]:
     cfg = (cfg or SplitterConfig()).normalized()
+    if cfg.parent_child:
+        diagnostics = Diagnostics(selected_tier="parent_child", tier_chain=["parent_child"])
+        return split_parent_child(text, *_parent_child_configs(cfg)), diagnostics
+
     diagnostics = Diagnostics()
     if not text:
         diagnostics.tier_chain = _tier_chain(cfg, None)
@@ -56,8 +73,12 @@ def split_parent_child(
     if not text:
         return ParentChildResult(parents=[], children=[])
 
-    parent_cfg = (parent_cfg or SplitterConfig(chunk_size=4096)).normalized()
-    child_cfg = (child_cfg or SplitterConfig(chunk_size=384)).normalized()
+    parent_cfg = _leaf_config(
+        parent_cfg or SplitterConfig(chunk_size=DEFAULT_PARENT_CHUNK_SIZE)
+    ).normalized()
+    child_cfg = _leaf_config(
+        child_cfg or SplitterConfig(chunk_size=DEFAULT_CHILD_CHUNK_SIZE)
+    ).normalized()
     parents = split(text, parent_cfg)
     if not parents:
         return ParentChildResult(parents=[], children=[])
@@ -88,6 +109,19 @@ def split_parent_child(
 
     assign_sequence(kept_parents)
     return ParentChildResult(parents=kept_parents, children=children)
+
+
+def _parent_child_configs(cfg: SplitterConfig) -> Tuple[SplitterConfig, SplitterConfig]:
+    cfg = cfg.normalized()
+    parent_cfg = _leaf_config(cfg, chunk_size=cfg.parent_chunk_size)
+    child_cfg = _leaf_config(cfg, chunk_size=cfg.child_chunk_size)
+    return parent_cfg, child_cfg
+
+
+def _leaf_config(cfg: SplitterConfig, chunk_size: int = None) -> SplitterConfig:
+    if chunk_size is not None:
+        cfg = replace(cfg, chunk_size=chunk_size)
+    return replace(cfg, parent_child=False)
 
 
 def validate_chunks(chunks: List[Chunk], total_chars: int, cfg: SplitterConfig) -> Tuple[bool, str]:

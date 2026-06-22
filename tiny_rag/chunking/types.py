@@ -6,6 +6,8 @@ from typing import List, Optional
 
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_CHUNK_OVERLAP = 80
+DEFAULT_PARENT_CHUNK_SIZE = 4096
+DEFAULT_CHILD_CHUNK_SIZE = 384
 DEFAULT_SEPARATORS = ["\n\n", "\n", "。"]
 ABSOLUTE_MAX_SIZE = 7500
 
@@ -18,9 +20,22 @@ class SplitterConfig:
     strategy: str = ""
     token_limit: int = 0
     languages: List[str] = field(default_factory=list)
+    parent_child: bool = False
+    parent_chunk_size: int = DEFAULT_PARENT_CHUNK_SIZE
+    child_chunk_size: int = DEFAULT_CHILD_CHUNK_SIZE
 
     def normalized(self, default_overlap: bool = True) -> "SplitterConfig":
         chunk_size = self.chunk_size if self.chunk_size > 0 else DEFAULT_CHUNK_SIZE
+        parent_chunk_size = (
+            self.parent_chunk_size
+            if self.parent_chunk_size > 0
+            else DEFAULT_PARENT_CHUNK_SIZE
+        )
+        child_chunk_size = (
+            self.child_chunk_size
+            if self.child_chunk_size > 0
+            else DEFAULT_CHILD_CHUNK_SIZE
+        )
 
         chunk_overlap = self.chunk_overlap
         if chunk_overlap <= 0 and (default_overlap or chunk_overlap < 0):
@@ -34,8 +49,11 @@ class SplitterConfig:
             budget = int(self.token_limit * _estimated_chars_per_token(self.languages))
             if budget > 0:
                 chunk_size = min(chunk_size, budget)
+                parent_chunk_size = min(parent_chunk_size, budget)
+                child_chunk_size = min(child_chunk_size, budget)
 
-        max_overlap = max(chunk_size // 2, 0)
+        overlap_budget_size = child_chunk_size if self.parent_child else chunk_size
+        max_overlap = max(overlap_budget_size // 2, 0)
         if chunk_overlap > max_overlap:
             chunk_overlap = max_overlap
 
@@ -46,6 +64,9 @@ class SplitterConfig:
             strategy=(self.strategy or "").strip().lower(),
             token_limit=self.token_limit,
             languages=list(self.languages),
+            parent_child=bool(self.parent_child),
+            parent_chunk_size=parent_chunk_size,
+            child_chunk_size=child_chunk_size,
         )
 
 
