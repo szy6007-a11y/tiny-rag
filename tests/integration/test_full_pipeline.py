@@ -92,6 +92,99 @@ class FullPipelineSmokeTests(unittest.TestCase):
                 self.assertIn(diagnostics.selected_tier, {"heading", "heuristic", "legacy"})
                 self.assertEqual([], _offset_errors(document.content, chunks), path.name)
 
+    def test_markdown_document_persists_chunks_and_indexes_for_retrieval(self):
+        from tiny_rag.chunking import SplitterConfig
+        from tiny_rag.converting.parser.markdown_parser import MarkdownParser
+        from tiny_rag.indexing import (
+            KEYWORDS_RETRIEVER_TYPE,
+            VECTOR_RETRIEVER_TYPE,
+            index_knowledge_after_chunks_persisted,
+        )
+        from tiny_rag.indexing.models import RetrieveParams
+        from tiny_rag.indexing.repositories.sqlite import SQLiteIndexRepository
+        from tiny_rag.persistence import ChunkRepository, connect, persist_text_chunks
+
+        tenant_id = 7
+        knowledge_id = "knowledge-e2e"
+        knowledge_base_id = "kb-e2e"
+        source = b"""# Retrieval Operations Runbook
+
+## Ingest
+
+The document parser should normalize tables before chunking begins.
+
+| Metric | Value |
+| --- | --- |
+| latency_budget | 120ms |
+| index_path | sqlite-vector |
+
+## Search
+
+Operators can retrieve the latency_budget term through keyword search after indexing.
+Vector search should also return the stored chunk metadata.
+"""
+
+        document = MarkdownParser(file_name="runbook.md", file_type="md").parse_into_text(source)
+        conn = connect(":memory:")
+        persist_result = persist_text_chunks(
+            conn,
+            tenant_id=tenant_id,
+            knowledge_id=knowledge_id,
+            knowledge_base_id=knowledge_base_id,
+            text=document.content,
+            config=SplitterConfig(
+                chunk_size=180,
+                chunk_overlap=30,
+                separators=["\n\n", "\n", ". "],
+                strategy="auto",
+            ),
+        )
+
+        repository = SQLiteIndexRepository(conn)
+        embedder = _DeterministicEmbedder()
+        index_stats = index_knowledge_after_chunks_persisted(
+            conn=conn,
+            repository=repository,
+            embedder=embedder,
+            knowledge_id=knowledge_id,
+            title="Retrieval Operations Runbook",
+            chunks=persist_result.inserted_chunks,
+            retriever_types=[KEYWORDS_RETRIEVER_TYPE, VECTOR_RETRIEVER_TYPE],
+        )
+
+        persisted_text_chunks = ChunkRepository(conn).list_chunks_by_knowledge_id(
+            tenant_id=tenant_id,
+            knowledge_id=knowledge_id,
+        )
+        self.assertEqual(index_stats.text_chunk_count, len(persisted_text_chunks))
+        self.assertEqual(index_stats.metadata_count, index_stats.text_chunk_count)
+        self.assertEqual(index_stats.fts_count, index_stats.text_chunk_count)
+        self.assertEqual(index_stats.vector_count, index_stats.text_chunk_count)
+        self.assertEqual(index_stats.embedded_count, index_stats.text_chunk_count)
+
+        keyword_results = repository.retrieve(
+            RetrieveParams(
+                query="latency_budget",
+                top_k=3,
+                knowledge_ids=[knowledge_id],
+                retriever_type=KEYWORDS_RETRIEVER_TYPE,
+            )
+        )
+        self.assertTrue(keyword_results[0].results)
+        self.assertEqual(keyword_results[0].results[0].knowledge_id, knowledge_id)
+
+        vector_results = repository.retrieve(
+            RetrieveParams(
+                embedding=embedder.embeddings[0],
+                top_k=3,
+                knowledge_ids=[knowledge_id],
+                retriever_type=VECTOR_RETRIEVER_TYPE,
+            )
+        )
+        text_chunk_ids = {chunk.id for chunk in persisted_text_chunks}
+        self.assertTrue(vector_results[0].results)
+        self.assertIn(vector_results[0].results[0].chunk_id, text_chunk_ids)
+
 
 def _make_png(path: Path, title: str, Image, ImageDraw, ImageFont) -> None:
     img = Image.new("RGB", (640, 360), "white")
@@ -275,6 +368,41 @@ def _offset_errors(text: str, chunks) -> list[str]:
         if chunk.end - chunk.start != len(chunk.content):
             errors.append(f"seq={chunk.seq} length mismatch")
     return errors
+
+
+class _DeterministicEmbedder:
+    def __init__(self, dimensions: int = 4):
+        self.dimensions = dimensions
+        self.batch_calls: list[list[str]] = []
+        self.embeddings: list[list[float]] = []
+
+    def batch_embed(self, texts: list[str]) -> list[list[float]]:
+        self.batch_calls.append(list(texts))
+        embeddings = [_vector_for_text(text, self.dimensions) for text in texts]
+        self.embeddings.extend(embeddings)
+        return embeddings
+
+    def get_model_name(self) -> str:
+        return "deterministic-test"
+
+    def get_dimensions(self) -> int:
+        return self.dimensions
+
+    def get_model_id(self) -> str:
+        return "deterministic-test"
+
+
+def _vector_for_text(text: str, dimensions: int) -> list[float]:
+    seed = sum((index + 1) * ord(char) for index, char in enumerate(text[:512]))
+    features = [
+        float(seed % 97 + 1),
+        float(len(text) % 89 + 1),
+        float(text.count("\n") + 1),
+        float(len(set(text)) % 83 + 1),
+    ]
+    if dimensions <= len(features):
+        return features[:dimensions]
+    return features + [1.0] * (dimensions - len(features))
 
 
 if __name__ == "__main__":

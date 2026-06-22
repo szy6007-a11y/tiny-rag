@@ -1,0 +1,22 @@
+{
+  "name": "tiny-rag-agent-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "tiny-rag-agent-tui": "dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "verify:prompts": "npm run build && node scripts/verify-prompts.mjs",
+    "start": "node dist/main.js",
+    "dev": "npm run build && node dist/main.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

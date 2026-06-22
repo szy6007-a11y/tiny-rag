@@ -7,7 +7,10 @@ name = "tiny-rag"
 version = "0.1.0"
 description = "Lightweight document converting and chunking utilities for RAG experiments."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "httpx>=0.27",
+    "sqlite-vec>=0.1.9",
+]
 
 [project.optional-dependencies]
 converting = [
