@@ -23,6 +23,7 @@ These instructions apply to the `tiny_rag.chunking` package.
 
 ## Testing
 
-- Run `python3 -m unittest tests.test_chunking` after behavioral changes.
+- Run `uv run python scripts/run_tests.py unit` after behavioral changes.
+- Run `uv run python scripts/run_tests.py integration` when touching converting-to-chunking handoff behavior; this lane skips cleanly if optional document parser dependencies are not installed.
 - Add or update tests for offset integrity, diagnostics/fallback behavior, parent-child chunking, language-specific markers, table handling, and protected spans when those areas change.
 - Use `scripts/preview_chunking.py` for manual inspection of real Markdown or text fixtures.
