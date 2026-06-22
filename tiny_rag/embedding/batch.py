@@ -5,6 +5,8 @@ import time
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from typing import Sequence, TypeVar
 
+from tiny_rag.cancellation import CancellationToken, OperationCancelled, call_with_cancellation
+
 from .models import Embedder
 
 
@@ -46,16 +48,25 @@ def batch_embed_with_pool(
     *,
     batch_size: int | None = None,
     max_workers: int | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> list[list[float]]:
     if not texts:
         return []
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
 
     resolved_batch_size = batch_size or batch_embed_size()
     chunks = chunk_sequence(texts, resolved_batch_size)
     results: list[list[float] | None] = [None] * len(texts)
 
     def process(batch_index: int, batch: list[str]) -> None:
-        embeddings = model.batch_embed(batch)
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+        embeddings = call_with_cancellation(
+            model.batch_embed,
+            batch,
+            cancellation_token=cancellation_token,
+        )
         if len(embeddings) != len(batch):
             raise ValueError(
                 f"BatchEmbed returned {len(embeddings)} embeddings for {len(batch)} inputs"
@@ -65,12 +76,23 @@ def batch_embed_with_pool(
             results[offset + index] = embedding
 
     workers = min(max_workers or concurrency_pool_size(), len(chunks))
+    if workers <= 1:
+        for batch_index, batch in enumerate(chunks):
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
+            process(batch_index, batch)
+        return [embedding for embedding in results if embedding is not None]
+
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
             executor.submit(process, batch_index, batch)
             for batch_index, batch in enumerate(chunks)
         ]
         done, pending = wait(futures, return_when=FIRST_EXCEPTION)
+        if cancellation_token is not None and cancellation_token.is_cancelled():
+            for future in pending:
+                future.cancel()
+            cancellation_token.raise_if_cancelled()
         first_error = next((future.exception() for future in done if future.exception()), None)
         if first_error is not None:
             for future in pending:
@@ -82,22 +104,53 @@ def batch_embed_with_pool(
     return [embedding for embedding in results if embedding is not None]
 
 
-def batch_embed_with_backoff(model: Embedder, texts: list[str]) -> list[list[float]]:
+def batch_embed_with_backoff(
+    model: Embedder,
+    texts: list[str],
+    *,
+    cancellation_token: CancellationToken | None = None,
+) -> list[list[float]]:
     delay = EMBED_RETRY_BASE_DELAY_SECONDS
     last_error: Exception | None = None
 
     for attempt in range(EMBED_RETRY_ATTEMPTS):
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         try:
             batch_with_pool = getattr(model, "batch_embed_with_pool", None)
             if callable(batch_with_pool):
-                return batch_with_pool(model, texts)
-            return batch_embed_with_pool(model, texts)
+                return call_with_cancellation(
+                    batch_with_pool,
+                    model,
+                    texts,
+                    cancellation_token=cancellation_token,
+                )
+            return batch_embed_with_pool(model, texts, cancellation_token=cancellation_token)
+        except OperationCancelled:
+            raise
         except Exception as exc:
             last_error = exc
             if attempt + 1 < EMBED_RETRY_ATTEMPTS:
-                time.sleep(delay)
+                _sleep_with_cancellation(delay, cancellation_token=cancellation_token)
                 delay *= 2
 
     if last_error is not None:
         raise last_error
     return []
+
+
+def _sleep_with_cancellation(
+    seconds: float,
+    *,
+    cancellation_token: CancellationToken | None = None,
+) -> None:
+    if cancellation_token is None:
+        time.sleep(seconds)
+        return
+    deadline = time.monotonic() + seconds
+    while True:
+        cancellation_token.raise_if_cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 0.05))

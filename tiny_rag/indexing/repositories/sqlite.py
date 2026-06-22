@@ -10,6 +10,7 @@ from typing import Callable, Mapping, Sequence, TypeVar
 
 import sqlite_vec
 
+from tiny_rag.cancellation import CancellationToken, OperationCancelled
 from tiny_rag.indexing.models import (
     BatchSaveStats,
     IndexInfo,
@@ -163,12 +164,23 @@ class SQLiteIndexRepository:
     def Support(self) -> list[str]:
         return self.support()
 
-    def retrieve(self, params: RetrieveParams) -> list[RetrieveResult]:
+    def retrieve(
+        self,
+        params: RetrieveParams,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> list[RetrieveResult]:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         results: list[RetrieveResult] = []
 
         if params.retriever_type in {KEYWORDS_RETRIEVER_TYPE, ""}:
             try:
-                results.extend(self.keywords_retrieve(params))
+                results.extend(
+                    self.keywords_retrieve(params, cancellation_token=cancellation_token)
+                )
+            except OperationCancelled:
+                raise
             except Exception as exc:
                 results.append(
                     RetrieveResult(
@@ -180,7 +192,11 @@ class SQLiteIndexRepository:
 
         if params.retriever_type in {VECTOR_RETRIEVER_TYPE, ""}:
             try:
-                results.extend(self.vector_retrieve(params))
+                results.extend(
+                    self.vector_retrieve(params, cancellation_token=cancellation_token)
+                )
+            except OperationCancelled:
+                raise
             except Exception as exc:
                 results.append(
                     RetrieveResult(
@@ -397,7 +413,14 @@ class SQLiteIndexRepository:
 
         self._write_transaction(write)
 
-    def keywords_retrieve(self, params: RetrieveParams) -> list[RetrieveResult]:
+    def keywords_retrieve(
+        self,
+        params: RetrieveParams,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> list[RetrieveResult]:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         if params.query == "":
             return []
 
@@ -421,22 +444,30 @@ class SQLiteIndexRepository:
         sql += " ORDER BY score DESC LIMIT ?"
         args.append(params.top_k)
 
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         rows = self.conn.execute(sql, args).fetchall()
-        items = [
-            IndexWithScore(
-                id=str(row["id"]),
-                source_id=row["source_id"],
-                source_type=int(row["source_type"]),
-                chunk_id=row["chunk_id"],
-                knowledge_id=row["knowledge_id"],
-                knowledge_base_id=row["knowledge_base_id"],
-                tag_id=row["tag_id"] or "",
-                content=row["content"],
-                score=float(row["score"]),
-                match_type=MATCH_TYPE_KEYWORDS,
+        items = []
+        for row in rows:
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
+            score = float(row["score"])
+            if params.threshold > 0 and score < params.threshold:
+                continue
+            items.append(
+                IndexWithScore(
+                    id=str(row["id"]),
+                    source_id=row["source_id"],
+                    source_type=int(row["source_type"]),
+                    chunk_id=row["chunk_id"],
+                    knowledge_id=row["knowledge_id"],
+                    knowledge_base_id=row["knowledge_base_id"],
+                    tag_id=row["tag_id"] or "",
+                    content=row["content"],
+                    score=score,
+                    match_type=MATCH_TYPE_KEYWORDS,
+                )
             )
-            for row in rows
-        ]
         return [
             RetrieveResult(
                 results=items,
@@ -445,7 +476,14 @@ class SQLiteIndexRepository:
             )
         ]
 
-    def vector_retrieve(self, params: RetrieveParams) -> list[RetrieveResult]:
+    def vector_retrieve(
+        self,
+        params: RetrieveParams,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> list[RetrieveResult]:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         if not params.embedding:
             return []
 
@@ -472,22 +510,30 @@ class SQLiteIndexRepository:
 
         sql += " ORDER BY v.distance ASC"
 
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         rows = self.conn.execute(sql, args).fetchall()
-        items = [
-            IndexWithScore(
-                id=str(row["rowid"]),
-                source_id=row["source_id"],
-                source_type=int(row["source_type"]),
-                chunk_id=row["chunk_id"],
-                knowledge_id=row["knowledge_id"],
-                knowledge_base_id=row["knowledge_base_id"],
-                tag_id=row["tag_id"] or "",
-                content=row["content"],
-                score=1 - float(row["distance"]),
-                match_type=MATCH_TYPE_EMBEDDING,
+        items = []
+        for row in rows:
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
+            score = 1 - float(row["distance"])
+            if params.threshold > 0 and score < params.threshold:
+                continue
+            items.append(
+                IndexWithScore(
+                    id=str(row["rowid"]),
+                    source_id=row["source_id"],
+                    source_type=int(row["source_type"]),
+                    chunk_id=row["chunk_id"],
+                    knowledge_id=row["knowledge_id"],
+                    knowledge_base_id=row["knowledge_base_id"],
+                    tag_id=row["tag_id"] or "",
+                    content=row["content"],
+                    score=score,
+                    match_type=MATCH_TYPE_EMBEDDING,
+                )
             )
-            for row in rows
-        ]
         return [
             RetrieveResult(
                 results=items,
@@ -518,8 +564,13 @@ class SQLiteIndexRepository:
             embeddings = None
         return self.save(index_info, embeddings_by_source_id=embeddings)
 
-    def Retrieve(self, params: RetrieveParams) -> list[RetrieveResult]:
-        return self.retrieve(params)
+    def Retrieve(
+        self,
+        params: RetrieveParams,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> list[RetrieveResult]:
+        return self.retrieve(params, cancellation_token=cancellation_token)
 
     def DeleteByKnowledgeIDList(
         self,
@@ -789,6 +840,22 @@ def _build_filter_where(params: RetrieveParams) -> list[tuple[str, list[object]]
             (
                 "e.tag_id IN (" + _placeholders(len(params.tag_ids)) + ")",
                 list(params.tag_ids),
+            )
+        )
+    if params.exclude_knowledge_ids:
+        parts.append(
+            (
+                "e.knowledge_id NOT IN ("
+                + _placeholders(len(params.exclude_knowledge_ids))
+                + ")",
+                list(params.exclude_knowledge_ids),
+            )
+        )
+    if params.exclude_chunk_ids:
+        parts.append(
+            (
+                "e.chunk_id NOT IN (" + _placeholders(len(params.exclude_chunk_ids)) + ")",
+                list(params.exclude_chunk_ids),
             )
         )
     return parts

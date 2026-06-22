@@ -103,6 +103,20 @@ class ChunkRepository:
             chunk_type=CHUNK_TYPE_TEXT,
         )
 
+    def list_chunks_by_knowledge_base_id(
+        self,
+        *,
+        tenant_id: int,
+        knowledge_base_id: str,
+        include_deleted: bool = False,
+    ) -> list[ChunkRow]:
+        return self._list_chunks_by_knowledge_base_id(
+            tenant_id=tenant_id,
+            knowledge_base_id=knowledge_base_id,
+            include_deleted=include_deleted,
+            chunk_type=CHUNK_TYPE_TEXT,
+        )
+
     def list_parent_chunks_by_knowledge_id(
         self,
         *,
@@ -154,6 +168,83 @@ class ChunkRepository:
             ORDER BY chunk_index ASC, seq_id ASC
             """,
             params,
+        ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def _list_chunks_by_knowledge_base_id(
+        self,
+        *,
+        tenant_id: int,
+        knowledge_base_id: str,
+        include_deleted: bool,
+        chunk_type: str | None = None,
+    ) -> list[ChunkRow]:
+        where_deleted = "" if include_deleted else "AND deleted_at IS NULL"
+        type_filter = "" if chunk_type is None else "AND chunk_type = ?"
+        params: tuple = (tenant_id, knowledge_base_id)
+        if chunk_type is not None:
+            params = (tenant_id, knowledge_base_id, chunk_type)
+        rows = self.conn.execute(
+            f"""
+            SELECT {", ".join(INSERT_COLUMNS)}
+            FROM chunks
+            WHERE tenant_id = ?
+              AND knowledge_base_id = ?
+              {type_filter}
+              {where_deleted}
+            ORDER BY knowledge_id ASC, chunk_index ASC, seq_id ASC
+            """,
+            params,
+        ).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def list_chunks_by_id(
+        self,
+        *,
+        tenant_id: int,
+        chunk_ids: Sequence[str],
+        include_deleted: bool = False,
+    ) -> list[ChunkRow]:
+        ids = [chunk_id for chunk_id in chunk_ids if chunk_id]
+        if not ids:
+            return []
+        placeholders = ", ".join("?" for _ in ids)
+        where_deleted = "" if include_deleted else "AND deleted_at IS NULL"
+        rows = self.conn.execute(
+            f"""
+            SELECT {", ".join(INSERT_COLUMNS)}
+            FROM chunks
+            WHERE tenant_id = ?
+              AND id IN ({placeholders})
+              {where_deleted}
+            """,
+            (tenant_id, *ids),
+        ).fetchall()
+        chunk_map = {row["id"]: self._from_row(row) for row in rows}
+        return [chunk_map[chunk_id] for chunk_id in ids if chunk_id in chunk_map]
+
+    def list_chunks_by_parent_ids(
+        self,
+        *,
+        tenant_id: int,
+        parent_ids: Sequence[str],
+        include_deleted: bool = False,
+    ) -> list[ChunkRow]:
+        ids = [parent_id for parent_id in parent_ids if parent_id]
+        if not ids:
+            return []
+        placeholders = ", ".join("?" for _ in ids)
+        where_deleted = "" if include_deleted else "AND deleted_at IS NULL"
+        rows = self.conn.execute(
+            f"""
+            SELECT {", ".join(INSERT_COLUMNS)}
+            FROM chunks
+            WHERE tenant_id = ?
+              AND parent_chunk_id IN ({placeholders})
+              {where_deleted}
+            ORDER BY chunk_index ASC, seq_id ASC
+            """,
+            (tenant_id, *ids),
         ).fetchall()
         return [self._from_row(row) for row in rows]
 

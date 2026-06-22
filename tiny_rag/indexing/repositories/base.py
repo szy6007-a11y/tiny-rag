@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Mapping, Protocol, Sequence
 
+from tiny_rag.cancellation import CancellationToken
 from tiny_rag.indexing.models import BatchSaveStats, IndexInfo, RetrieveParams, RetrieveResult
 
 
@@ -12,7 +13,12 @@ class IndexRepository(Protocol):
     def support(self) -> list[str]:
         ...
 
-    def retrieve(self, params: RetrieveParams) -> list[RetrieveResult]:
+    def retrieve(
+        self,
+        params: RetrieveParams,
+        *,
+        cancellation_token: CancellationToken | None = None,
+    ) -> list[RetrieveResult]:
         ...
 
     def save(
