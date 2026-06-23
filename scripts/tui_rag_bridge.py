@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tiny_rag.agent import AgentConfig
-from tiny_rag.agent.tools import ToolKnowledgeSearch
+from tiny_rag.agent.tools import ToolGrepChunks, ToolKnowledgeSearch
 from tiny_rag.chunking import SplitterConfig
 from tiny_rag.persistence import connect
 from tiny_rag.retrieval import RankResult, RerankService
@@ -27,12 +27,13 @@ MANIFEST_SUFFIX = ".manifest.json"
 DEFAULT_KB_ID = "local-tui-kb"
 DEFAULT_TENANT_ID = 1
 DEFAULT_DIMENSIONS = 128
-DEFAULT_TUI_ALLOWED_TOOLS = (ToolKnowledgeSearch,)
+DEFAULT_TUI_ALLOWED_TOOLS = (ToolKnowledgeSearch, ToolGrepChunks)
 TUI_KNOWLEDGE_SEARCH_DESCRIPTION = """Search the bound local knowledge base and return complete evidence chunks for answering the user.
 
-Use this as the only retrieval tool in the TUI Agent. It supports both semantic
-questions and literal terms because the local pipeline combines vector-style
-matching, keyword retrieval, reranking, and context merging.
+Use this as the semantic retrieval tool in the TUI Agent. For exact identifiers,
+error codes, names, or literal strings, use grep_chunks when it is available.
+The local pipeline combines vector-style matching, keyword retrieval, reranking,
+and context merging.
 
 Input:
 - queries: 1-5 short search questions or phrases that express what evidence is

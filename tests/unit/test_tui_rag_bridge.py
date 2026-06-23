@@ -34,8 +34,19 @@ class TuiRagBridgeTests(TestCase):
             self.assertEqual(init_payload["knowledge_base"]["id"], "local-tui-kb")
             self.assertEqual(
                 sorted(tool["function"]["name"] for tool in init_payload["tools"]),
-                ["knowledge_search"],
+                ["grep_chunks", "knowledge_search"],
             )
+
+            grep_payload = run_bridge(
+                ["execute", "--db", db_path, "--tool", "grep_chunks"],
+                stdin={"query": "chunk_size"},
+            )
+
+            self.assertTrue(grep_payload["success"])
+            self.assertEqual(grep_payload["data"]["display_type"], "grep_results")
+            self.assertGreaterEqual(grep_payload["data"]["result_count"], 1)
+            self.assertIn("<grep_results", grep_payload["output"])
+            self.assertIn("chunk_size", grep_payload["output"])
 
             search_payload = run_bridge(
                 ["execute", "--db", db_path, "--tool", "knowledge_search"],

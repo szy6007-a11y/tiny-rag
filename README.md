@@ -35,7 +35,7 @@ document
   -> FTS5 keyword index + sqlite-vec vector index
   -> hybrid retrieval + rerank + merge
   -> Agent tool registry
-  -> knowledge_search tool call
+  -> RAG tool call
   -> final answer
 ```
 
@@ -209,9 +209,10 @@ npm start
 
 It supports streaming responses, thinking/answer separation, persisted local
 history, and generic function-calling execution. By default it indexes the
-bundled local KB and registers the complete user-facing `knowledge_search` tool
-inside the TUI loop. Pass one or more `--rag-document` arguments to replace the
-default KB with your own local files, or `--no-rag` for pure chat mode.
+bundled local KB and registers the user-facing `knowledge_search` and
+`grep_chunks` tools inside the TUI loop. Pass one or more `--rag-document`
+arguments to replace the default KB with your own local files, or `--no-rag` for
+pure chat mode.
 
 ## Project Layout
 

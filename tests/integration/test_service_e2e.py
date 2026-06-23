@@ -113,6 +113,75 @@ Vector search should also return the stored chunk metadata.
         )
         self.assertIn("latency_budget", chat_model.observed_tool_content)
 
+    def test_agent_query_can_trigger_grep_chunks_tool_chain(self):
+        conn = connect(":memory:")
+        self.addCleanup(conn.close)
+        embedder = DeterministicEmbedder()
+        kb = KnowledgeBaseConfig(
+            id="kb-grep-e2e",
+            tenant_id=7,
+            name="Operations KB",
+            embedding_model_id=embedder.get_model_id(),
+            keyword_enabled=True,
+            vector_enabled=True,
+        )
+        ingest_service = IngestService(conn, embedder=embedder, knowledge_bases={kb.id: kb})
+        ingest_service.ingest_document(
+            IngestRequest(
+                tenant_id=7,
+                knowledge_id="knowledge-grep-e2e",
+                knowledge_base_id=kb.id,
+                title="Retrieval Operations Runbook",
+                file_name="runbook.md",
+                file_type="md",
+                content=b"""# Retrieval Operations Runbook
+
+Operators can retrieve the latency_budget term through keyword search after indexing.
+The latency_budget is 120ms.
+""",
+                chunk_config=SplitterConfig(
+                    chunk_size=180,
+                    chunk_overlap=30,
+                    separators=["\n\n", "\n", ". "],
+                    strategy="auto",
+                ),
+                knowledge_base=kb,
+            )
+        )
+
+        agent_service = AgentService(
+            conn,
+            repository=ingest_service.repository,
+            chunk_repository=ingest_service.chunk_repository,
+            embedder=embedder,
+            knowledge_bases=ingest_service.knowledge_bases,
+            knowledge_records=ingest_service.knowledge_records,
+            rerank_service=RerankService(PassthroughReranker()),
+        )
+        chat_model = GrepToolCallingChatModel()
+        session_service = SessionService(agent_service, chat_model)
+
+        result = session_service.agent_qa(
+            AgentQARequest(
+                query="Find the exact latency_budget value.",
+                session_id="session-grep-e2e",
+                tenant_id=7,
+                knowledge_base_ids=[kb.id],
+            )
+        )
+
+        self.assertTrue(result.state.is_complete)
+        self.assertIn("120ms", result.state.final_answer)
+        self.assertEqual(len(result.state.round_steps), 2)
+        tool_call = result.state.round_steps[0].tool_calls[0]
+        self.assertEqual(tool_call.name, ToolGrepChunks)
+        self.assertTrue(tool_call.result.success)
+        self.assertEqual(tool_call.result.data["display_type"], "grep_results")
+        self.assertEqual(tool_call.result.data["result_count"], 1)
+        self.assertIn("<grep_results", chat_model.observed_tool_content)
+        self.assertIn("<query_hit", chat_model.observed_tool_content)
+        self.assertIn("latency_budget", chat_model.observed_tool_content)
+
 
 class ToolCallingChatModel:
     def __init__(self) -> None:
@@ -153,6 +222,41 @@ class ToolCallingChatModel:
     def assert_runtime_context(self, content: str) -> None:
         assert "<runtime_context" in content
         assert 'knowledge_base id="kb-e2e"' in content
+
+
+class GrepToolCallingChatModel:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[Message], list[str]]] = []
+        self.observed_tool_content = ""
+
+    def chat(self, messages: list[Message], opts: ChatOptions) -> ChatResponse:
+        tool_names = [tool["function"]["name"] for tool in opts.tools]
+        self.calls.append((list(messages), tool_names))
+        if len(self.calls) == 1:
+            assert ToolGrepChunks in tool_names
+            return ChatResponse(
+                finish_reason="tool_calls",
+                tool_calls=[
+                    LLMToolCall(
+                        id="call-grep",
+                        function=FunctionCall(
+                            name=ToolGrepChunks,
+                            arguments='{"query":"latency_budget"}',
+                        ),
+                    )
+                ],
+            )
+
+        tool_message = messages[-1]
+        assert tool_message.role == "tool"
+        assert tool_message.name == ToolGrepChunks
+        self.observed_tool_content = tool_message.content
+        assert "latency_budget" in tool_message.content
+        assert "120ms" in tool_message.content
+        return ChatResponse(
+            content="The latency_budget in the runbook is 120ms.",
+            finish_reason="stop",
+        )
 
 
 class DeterministicEmbedder:
