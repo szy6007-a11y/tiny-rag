@@ -14,3 +14,11 @@ build/
 *.egg-info/
 tmp/
 .agent-tui-rag.sqlite*
+
+# Local RAG knowledge/data artifacts
+/knowledge/
+*.sqlite*
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
