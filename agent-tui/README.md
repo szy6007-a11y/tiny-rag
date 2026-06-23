@@ -96,12 +96,16 @@ This checks:
 
 ## RAG Tool Mode
 
-By default, the TUI registers only the complete user-facing Q&A tool:
+By default, the TUI registers the core RAG tools that are wired through the
+Python service/tool registry:
 
 - `knowledge_search`
+- `grep_chunks`
 
 The bridge uses the existing Python service/tool registry and a local hash
 embedder plus lexical reranker, so document retrieval does not require separate
-embedding or rerank API keys. Python-side helper tools such as `grep_chunks`,
-`list_knowledge_chunks`, and `get_document_info` remain available in the service
-layer, but they are not exposed in the default TUI Agent surface.
+embedding or rerank API keys. `knowledge_search` handles semantic retrieval;
+`grep_chunks` performs exact regex/literal lookup over indexed chunk content.
+Other Python-side helper tools such as `list_knowledge_chunks` and
+`get_document_info` remain available in the service layer until they are wired
+into the default TUI Agent surface.

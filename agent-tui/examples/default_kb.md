@@ -8,13 +8,14 @@ reranking, context merging, and an OpenAI-compatible function-calling Agent
 loop.
 
 The TypeScript TUI starts in Agent Q&A mode by default. On startup it indexes
-this default knowledge base and registers the core Python Tiny RAG tool:
+this default knowledge base and registers the core Python Tiny RAG tools:
 
 - `knowledge_search` for semantic retrieval
+- `grep_chunks` for exact keyword/regex lookup
 
-Other Python-side tools exist for development and service-level workflows, but
-the TUI keeps the default Agent surface small and exposes only the complete
-Q&A retrieval capability.
+Other Python-side tools exist for development and service-level workflows.
+`list_knowledge_chunks` and `get_document_info` remain service-layer tools until
+they are wired into the default TUI Agent surface.
 
 ## Retrieval Pipeline
 

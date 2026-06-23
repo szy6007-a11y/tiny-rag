@@ -34,7 +34,7 @@ chunking、SQLite 持久化、关键词/向量索引、混合检索、rerank、�
   -> FTS5 关键词索引 + sqlite-vec 向量索引
   -> hybrid retrieval + rerank + merge
   -> Agent tool registry
-  -> knowledge_search 工具调用
+  -> RAG 工具调用
   -> 最终回答
 ```
 
@@ -206,8 +206,9 @@ npm start
 
 它支持流式响应、thinking/answer 分离、本地历史和通用 function-calling 执行。
 默认启动时会索引内置本地 KB，并在 TypeScript Agent loop 内注册
-面向用户问答的完整工具 `knowledge_search`。传入一个或多个 `--rag-document`
-参数可以用自己的本地文件替换默认 KB；传 `--no-rag` 则进入纯聊天模式。
+面向用户问答的 `knowledge_search` 和 `grep_chunks` 工具。传入一个或多个
+`--rag-document` 参数可以用自己的本地文件替换默认 KB；传 `--no-rag` 则进入
+纯聊天模式。
 
 ## 项目结构
 

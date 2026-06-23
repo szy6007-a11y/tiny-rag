@@ -30,7 +30,7 @@ from tiny_rag.agent.tools import (
     toolErrorHint,
 )
 from tiny_rag.agent.tools.tool import ToolExecutionError
-from tiny_rag.persistence import ChunkRepository, connect, persist_text_chunks
+from tiny_rag.persistence import ChunkRepository, ChunkRow, connect, persist_text_chunks
 from tiny_rag.retrieval.models import KnowledgeBaseRef, SearchResult
 
 
@@ -590,12 +590,28 @@ class RetrievalInspectionToolTests(TestCase):
         repo = ChunkRepository(conn)
         targets = [SearchTarget(knowledge_base_id="kb-ops", tenant_id=9)]
 
-        grep_result = GrepChunksTool(repo, search_targets=targets).execute(
-            {"query": "latency_budget"}
+        grep_tool = GrepChunksTool(
+            repo,
+            search_targets=targets,
+            knowledge_titles={"knowledge-ops": "Ops"},
         )
+        grep_result = grep_tool.execute({"query": "latency_budget"})
         self.assertTrue(grep_result.success)
-        self.assertEqual(grep_result.data["count"], 1)
+        self.assertEqual(grep_result.data["result_count"], 1)
+        self.assertEqual(grep_result.data["document_count"], 1)
+        self.assertEqual(grep_result.data["display_type"], "grep_results")
+        self.assertEqual(grep_result.data["chunk_results"][0]["knowledge_title"], "Ops")
+        self.assertEqual(
+            grep_result.data["knowledge_results"][0]["pattern_counts"],
+            {"latency_budget": 1},
+        )
+        self.assertIn('<grep_results chunk_count="1">', grep_result.output)
+        self.assertIn('<query_hit query="latency_budget" count="1" />', grep_result.output)
         self.assertIn("latency_budget", grep_result.output)
+
+        repeated_result = grep_tool.execute({"query": "latency_budget"})
+        self.assertIn('already_seen="true"', repeated_result.output)
+        self.assertIn("snippet omitted", repeated_result.output)
 
         list_result = ListKnowledgeChunksTool(repo, search_targets=targets).execute(
             {"knowledge_id": "knowledge-ops"}
@@ -620,11 +636,108 @@ class RetrievalInspectionToolTests(TestCase):
             knowledge_base_id="kb-ops",
             text="The latency_budget is 120ms.",
         )
+        persist_text_chunks(
+            conn,
+            tenant_id=9,
+            knowledge_id="knowledge-secret",
+            knowledge_base_id="kb-other",
+            text="The secret_code is 999.",
+        )
         repo = ChunkRepository(conn)
         tool = GrepChunksTool(
             repo,
             search_targets=[SearchTarget(knowledge_base_id="kb-ops", tenant_id=9)],
         )
 
-        with self.assertRaisesRegex(ToolExecutionError, "no search targets available"):
-            tool.execute({"query": "latency_budget", "knowledge_base_ids": ["kb-other"]})
+        result_value = tool.execute({"query": "secret_code", "knowledge_base_ids": ["kb-other"]})
+
+        self.assertTrue(result_value.success)
+        self.assertEqual(result_value.data["result_count"], 0)
+        self.assertEqual(result_value.data["knowledge_base_ids"], ["kb-ops"])
+        self.assertIn('<grep_results chunk_count="0">', result_value.output)
+        self.assertNotIn("secret_code is 999", result_value.output)
+
+    def test_grep_knowledge_scope_keeps_tenant_and_kb_boundaries(self):
+        conn = connect(":memory:")
+        repo = ChunkRepository(conn)
+        repo.create_chunks(
+            [
+                ChunkRow(
+                    tenant_id=9,
+                    knowledge_id="shared-knowledge",
+                    knowledge_base_id="kb-ops",
+                    content="The latency_budget is 120ms.",
+                    chunk_index=0,
+                    start_at=0,
+                    end_at=28,
+                ),
+                ChunkRow(
+                    tenant_id=9,
+                    knowledge_id="shared-knowledge",
+                    knowledge_base_id="kb-other",
+                    content="The secret_code is 999.",
+                    chunk_index=0,
+                    start_at=0,
+                    end_at=23,
+                ),
+                ChunkRow(
+                    tenant_id=10,
+                    knowledge_id="shared-knowledge",
+                    knowledge_base_id="kb-ops",
+                    content="The tenant_secret is 888.",
+                    chunk_index=0,
+                    start_at=0,
+                    end_at=25,
+                ),
+            ]
+        )
+        tool = GrepChunksTool(
+            repo,
+            search_targets=[
+                SearchTarget(
+                    knowledge_base_id="kb-ops",
+                    knowledge_ids=("shared-knowledge",),
+                    tenant_id=9,
+                    target_type="knowledge",
+                )
+            ],
+        )
+
+        secret_result = tool.execute({"query": "secret_code|tenant_secret"})
+        allowed_result = tool.execute({"query": "latency_budget"})
+
+        self.assertTrue(secret_result.success)
+        self.assertEqual(secret_result.data["result_count"], 0)
+        self.assertNotIn("secret_code is 999", secret_result.output)
+        self.assertNotIn("tenant_secret is 888", secret_result.output)
+        self.assertTrue(allowed_result.success)
+        self.assertEqual(allowed_result.data["result_count"], 1)
+        self.assertEqual(allowed_result.data["knowledge_results"][0]["total_chunk_count"], 1)
+        self.assertIn("latency_budget", allowed_result.output)
+
+        multi_scope_tool = GrepChunksTool(
+            repo,
+            search_targets=[
+                SearchTarget(
+                    knowledge_base_id="kb-ops",
+                    knowledge_ids=("shared-knowledge",),
+                    tenant_id=9,
+                    target_type="knowledge",
+                ),
+                SearchTarget(
+                    knowledge_base_id="kb-other",
+                    knowledge_ids=("shared-knowledge",),
+                    tenant_id=9,
+                    target_type="knowledge",
+                ),
+            ],
+        )
+        multi_scope_result = multi_scope_tool.execute({"query": "latency_budget|secret_code"})
+
+        self.assertTrue(multi_scope_result.success)
+        self.assertEqual(multi_scope_result.data["result_count"], 2)
+        self.assertEqual(multi_scope_result.data["document_count"], 2)
+        self.assertEqual(
+            {entry["knowledge_base_id"] for entry in multi_scope_result.data["knowledge_results"]},
+            {"kb-ops", "kb-other"},
+        )

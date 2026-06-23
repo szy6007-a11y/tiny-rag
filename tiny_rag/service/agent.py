@@ -127,7 +127,14 @@ class AgentService:
                     },
                 )
             elif tool_name == ToolGrepChunks:
-                tool = GrepChunksTool(self.chunk_repository, search_targets=targets)
+                tool = GrepChunksTool(
+                    self.chunk_repository,
+                    search_targets=targets,
+                    knowledge_titles={
+                        knowledge_id: record.title
+                        for knowledge_id, record in self.knowledge_records.items()
+                    },
+                )
             elif tool_name == ToolListKnowledgeChunks:
                 tool = ListKnowledgeChunksTool(self.chunk_repository, search_targets=targets)
             elif tool_name == ToolGetDocumentInfo:
@@ -188,6 +195,7 @@ class AgentService:
                         knowledge_base_id=kb_id,
                         knowledge_ids=tuple(ids),
                         tenant_id=_target_tenant_id(kb, tenant_id),
+                        target_type="knowledge",
                         knowledge_base_type=kb.kb_type if kb is not None else "",
                     )
                 )
@@ -199,6 +207,7 @@ class AgentService:
                             knowledge_base_id=kb_id,
                             knowledge_ids=tuple(unresolved),
                             tenant_id=_target_tenant_id(kb, tenant_id),
+                            target_type="knowledge",
                             knowledge_base_type=kb.kb_type if kb is not None else "",
                         )
                     )
