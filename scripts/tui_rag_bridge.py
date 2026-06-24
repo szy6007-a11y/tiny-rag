@@ -7,7 +7,6 @@ import json
 import math
 import re
 import sys
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -17,10 +16,11 @@ if str(ROOT) not in sys.path:
 
 from tiny_rag.agent import AgentConfig
 from tiny_rag.agent.tools import ToolGrepChunks, ToolKnowledgeSearch
-from tiny_rag.chunking import SplitterConfig
 from tiny_rag.persistence import connect
 from tiny_rag.retrieval import RankResult, RerankService
-from tiny_rag.service import AgentService, IngestRequest, IngestService, KnowledgeBaseConfig
+from tiny_rag.service.agent import AgentService
+from tiny_rag.service.knowledge_lifecycle import KnowledgeRepository, PARSE_STATUS_COMPLETED
+from tiny_rag.service.models import KnowledgeBaseConfig, KnowledgeRecord
 
 
 MANIFEST_SUFFIX = ".manifest.json"
@@ -182,12 +182,14 @@ def build_services(db_path: str | Path, manifest: dict[str, Any]) -> tuple[Agent
         knowledge_bases={kb.id: kb},
         rerank_service=RerankService(LocalLexicalReranker()),
     )
-    records = {}
-    for doc in manifest.get("documents") or []:
-        knowledge_id = str(doc.get("knowledge_id") or "")
-        if not knowledge_id:
-            continue
-        records[knowledge_id] = service_record_from_manifest(doc, kb.id, tenant_id)
+    records = records_from_db(conn, kb.id, tenant_id)
+    if not records:
+        records = {}
+        for doc in manifest.get("documents") or []:
+            knowledge_id = str(doc.get("knowledge_id") or "")
+            if not knowledge_id:
+                continue
+            records[knowledge_id] = service_record_from_manifest(doc, kb.id, tenant_id)
     service.knowledge_records.update(records)
     config = AgentConfig(
         allowed_tools=allowed_tools_from_manifest(manifest),
@@ -198,9 +200,7 @@ def build_services(db_path: str | Path, manifest: dict[str, Any]) -> tuple[Agent
     return service, tenant_id, config
 
 
-def service_record_from_manifest(doc: dict[str, Any], kb_id: str, tenant_id: int):
-    from tiny_rag.service import KnowledgeRecord
-
+def service_record_from_manifest(doc: dict[str, Any], kb_id: str, tenant_id: int) -> KnowledgeRecord:
     return KnowledgeRecord(
         id=str(doc.get("knowledge_id") or ""),
         knowledge_base_id=kb_id,
@@ -208,9 +208,53 @@ def service_record_from_manifest(doc: dict[str, Any], kb_id: str, tenant_id: int
         title=str(doc.get("title") or doc.get("file_name") or doc.get("knowledge_id") or ""),
         file_name=str(doc.get("file_name") or ""),
         file_type=str(doc.get("file_type") or ""),
+        file_size=int(doc.get("file_size") or 0),
+        file_hash=str(doc.get("file_hash") or ""),
         source=str(doc.get("path") or ""),
+        file_path=str(doc.get("path") or ""),
         metadata={"path": str(doc.get("path") or "")},
     )
+
+
+def records_from_db(conn, kb_id: str, tenant_id: int) -> dict[str, KnowledgeRecord]:
+    try:
+        repo = KnowledgeRepository(conn)
+        records = repo.list_by_knowledge_base(
+            tenant_id=tenant_id,
+            knowledge_base_id=kb_id,
+        )
+    except Exception:
+        return {}
+    return {
+        record.id: record
+        for record in records
+        if record.parse_status == PARSE_STATUS_COMPLETED
+    }
+
+
+def docs_from_records(service: AgentService, records: Sequence[KnowledgeRecord]) -> list[dict[str, Any]]:
+    docs: list[dict[str, Any]] = []
+    for record in sorted(records, key=lambda item: (item.created_at, item.id)):
+        chunk_count = len(
+            service.chunk_repository.list_chunks_by_knowledge_id(
+                tenant_id=record.tenant_id,
+                knowledge_id=record.id,
+            )
+        )
+        docs.append(
+            {
+                "knowledge_id": record.id,
+                "knowledge_base_id": record.knowledge_base_id,
+                "title": record.title,
+                "file_name": record.file_name,
+                "file_type": record.file_type,
+                "file_size": record.file_size,
+                "file_hash": record.file_hash,
+                "path": record.source or record.file_path,
+                "chunk_count": chunk_count,
+            }
+        )
+    return docs
 
 
 def allowed_tools_from_manifest(manifest: dict[str, Any]) -> list[str]:
@@ -219,114 +263,6 @@ def allowed_tools_from_manifest(manifest: dict[str, Any]) -> list[str]:
         return list(DEFAULT_TUI_ALLOWED_TOOLS)
     tools = [str(item).strip() for item in raw if str(item).strip()]
     return tools or list(DEFAULT_TUI_ALLOWED_TOOLS)
-
-
-def init_command(args: argparse.Namespace) -> int:
-    documents = [Path(item).expanduser().resolve() for item in args.document]
-    if not documents:
-        raise ValueError("at least one --document is required")
-    missing = [str(path) for path in documents if not path.exists()]
-    if missing:
-        raise FileNotFoundError("document not found: " + ", ".join(missing))
-
-    db_path = Path(args.db).expanduser().resolve()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        db_path.unlink()
-    mpath = manifest_path(db_path)
-    if mpath.exists():
-        mpath.unlink()
-
-    tenant_id = int(args.tenant_id)
-    allowed_tools = list(args.allowed_tool or DEFAULT_TUI_ALLOWED_TOOLS)
-    embedder = LocalHashEmbedder(int(args.embedding_dimensions))
-    kb = KnowledgeBaseConfig(
-        id=args.knowledge_base_id,
-        tenant_id=tenant_id,
-        name=args.knowledge_base_name or "Local TUI Knowledge Base",
-        embedding_model_id=embedder.get_model_id(),
-        vector_enabled=True,
-        keyword_enabled=True,
-    )
-
-    conn = connect(db_path)
-    try:
-        ingest_service = IngestService(conn, embedder=embedder, knowledge_bases={kb.id: kb})
-        manifest_docs: list[dict[str, Any]] = []
-        for index, path in enumerate(documents, start=1):
-            knowledge_id = args.knowledge_id[index - 1] if index - 1 < len(args.knowledge_id) else f"local-doc-{index}"
-            result = ingest_service.ingest_document(
-                IngestRequest(
-                    tenant_id=tenant_id,
-                    knowledge_id=knowledge_id,
-                    knowledge_base_id=kb.id,
-                    title=path.stem,
-                    file_name=path.name,
-                    file_type=path.suffix.lstrip(".").lower() or "md",
-                    content=path,
-                    chunk_config=SplitterConfig(
-                        chunk_size=int(args.chunk_size),
-                        chunk_overlap=int(args.chunk_overlap),
-                        strategy="auto",
-                    ),
-                    knowledge_base=kb,
-                )
-            )
-            manifest_docs.append(
-                {
-                    "knowledge_id": result.knowledge.id,
-                    "knowledge_base_id": kb.id,
-                    "title": result.knowledge.title,
-                    "file_name": result.knowledge.file_name,
-                    "file_type": result.knowledge.file_type,
-                    "path": str(path),
-                    "file_size": path.stat().st_size,
-                    "chunk_count": result.index_stats.text_chunk_count,
-                }
-            )
-
-        service = AgentService(
-            conn,
-            repository=ingest_service.repository,
-            chunk_repository=ingest_service.chunk_repository,
-            embedder=embedder,
-            knowledge_bases=ingest_service.knowledge_bases,
-            knowledge_records=ingest_service.knowledge_records,
-            rerank_service=RerankService(LocalLexicalReranker()),
-        )
-        config = AgentConfig(
-            allowed_tools=allowed_tools,
-            knowledge_bases=[kb.id],
-            knowledge_ids=[doc["knowledge_id"] for doc in manifest_docs],
-            max_tool_output_chars=int(args.max_tool_output_chars),
-        )
-        registry = service.create_tool_registry(config, tenant_id=tenant_id)
-        tools = tui_tool_definitions(registry)
-    finally:
-        conn.close()
-
-    manifest = {
-        "tenant_id": tenant_id,
-        "db_path": str(db_path),
-        "embedding_dimensions": int(args.embedding_dimensions),
-        "max_tool_output_chars": int(args.max_tool_output_chars),
-        "allowed_tools": allowed_tools,
-        "knowledge_base": asdict(kb),
-        "documents": manifest_docs,
-    }
-    mpath.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    write_json(
-        {
-            "success": True,
-            "db_path": str(db_path),
-            "manifest_path": str(mpath),
-            "knowledge_base": tui_kb_payload(kb, manifest_docs),
-            "selected_documents": [tui_doc_payload(doc) for doc in manifest_docs],
-            "tools": tools,
-        }
-    )
-    return 0
 
 
 def execute_command(args: argparse.Namespace) -> int:
@@ -348,6 +284,9 @@ def definitions_command(args: argparse.Namespace) -> int:
     service, tenant_id, config = build_services(args.db, manifest)
     try:
         registry = service.create_tool_registry(config, tenant_id=tenant_id)
+        docs = docs_from_records(service, service.knowledge_records.values())
+        if not docs:
+            docs = list(manifest.get("documents") or [])
         write_json(
             {
                 "success": True,
@@ -358,9 +297,9 @@ def definitions_command(args: argparse.Namespace) -> int:
                         tenant_id=int(manifest.get("tenant_id") or DEFAULT_TENANT_ID),
                         name=str(manifest["knowledge_base"].get("name") or "Local TUI Knowledge Base"),
                     ),
-                    manifest.get("documents") or [],
+                    docs,
                 ),
-                "selected_documents": [tui_doc_payload(doc) for doc in manifest.get("documents") or []],
+                "selected_documents": [tui_doc_payload(doc) for doc in docs],
             }
         )
     finally:
@@ -403,20 +342,6 @@ def tui_doc_payload(doc: dict[str, Any]) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Tiny RAG TUI Python bridge")
     sub = parser.add_subparsers(dest="command", required=True)
-
-    init = sub.add_parser("init", help="ingest local documents into a TUI RAG database")
-    init.add_argument("--db", required=True)
-    init.add_argument("--document", action="append", default=[])
-    init.add_argument("--knowledge-id", action="append", default=[])
-    init.add_argument("--knowledge-base-id", default=DEFAULT_KB_ID)
-    init.add_argument("--knowledge-base-name", default="Local TUI Knowledge Base")
-    init.add_argument("--tenant-id", type=int, default=DEFAULT_TENANT_ID)
-    init.add_argument("--chunk-size", type=int, default=512)
-    init.add_argument("--chunk-overlap", type=int, default=80)
-    init.add_argument("--embedding-dimensions", type=int, default=DEFAULT_DIMENSIONS)
-    init.add_argument("--max-tool-output-chars", type=int, default=16000)
-    init.add_argument("--allowed-tool", action="append", default=[])
-    init.set_defaults(func=init_command)
 
     execute = sub.add_parser("execute", help="execute one registered RAG tool")
     execute.add_argument("--db", required=True)

@@ -1,21 +1,20 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ChatTool, KnowledgeBaseInfo, RuntimeTool, SelectedDocumentInfo, ToolResult } from "./types.js";
 import { ToolRegistry } from "./tool-registry.js";
 
 export interface RagConfig {
-  documents: string[];
   dbPath: string;
   pythonCommand: string;
   bridgeScript: string;
-  tenantId: number;
-  knowledgeBaseId: string;
-  knowledgeBaseName: string;
-  chunkSize: number;
-  chunkOverlap: number;
-  embeddingDimensions: number;
-  maxToolOutputChars: number;
+  ingestScript: string;
+  docsDir: string;
+  enabled: boolean;
+  autoSync: boolean;
+  watch: boolean;
+  watchInterval: number;
 }
 
 export interface RagInitResult {
@@ -23,9 +22,10 @@ export interface RagInitResult {
   knowledgeBase?: KnowledgeBaseInfo;
   selectedDocuments: SelectedDocumentInfo[];
   tools: string[];
+  cleanup?: () => void;
 }
 
-interface BridgeInitPayload {
+interface BridgeDefinitionsPayload {
   success: boolean;
   error?: string;
   knowledge_base?: KnowledgeBaseInfo;
@@ -37,52 +37,63 @@ const DEFAULT_BRIDGE_SCRIPT = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../scripts/tui_rag_bridge.py",
 );
+const DEFAULT_INGEST_SCRIPT = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../ingest.py",
+);
 
 export function defaultBridgeScript(): string {
   return DEFAULT_BRIDGE_SCRIPT;
 }
 
+export function defaultIngestScript(): string {
+  return DEFAULT_INGEST_SCRIPT;
+}
+
 export function registerRagTools(registry: ToolRegistry, config: RagConfig): RagInitResult {
-  if (config.documents.length === 0) {
+  if (!config.enabled) {
     return { enabled: false, selectedDocuments: [], tools: [] };
   }
 
-  const initPayload = runBridgeSync(config, [
-    "init",
-    "--db",
-    config.dbPath,
-    "--tenant-id",
-    String(config.tenantId),
-    "--knowledge-base-id",
-    config.knowledgeBaseId,
-    "--knowledge-base-name",
-    config.knowledgeBaseName,
-    "--chunk-size",
-    String(config.chunkSize),
-    "--chunk-overlap",
-    String(config.chunkOverlap),
-    "--embedding-dimensions",
-    String(config.embeddingDimensions),
-    "--max-tool-output-chars",
-    String(config.maxToolOutputChars),
-    ...config.documents.flatMap((document) => ["--document", document]),
-  ]) as BridgeInitPayload;
-
-  if (!initPayload.success) {
-    throw new Error(initPayload.error || "failed to initialize local RAG bridge");
+  if (config.autoSync) {
+    runIngestSync(config, ["--allow-empty"]);
   }
 
-  const tools = initPayload.tools ?? [];
+  if (!existingIndexAvailable(config.dbPath)) {
+    return { enabled: false, selectedDocuments: [], tools: [] };
+  }
+
+  const definitionsPayload = runBridgeSync(config, [
+    "definitions",
+    "--db",
+    config.dbPath,
+  ]) as BridgeDefinitionsPayload;
+
+  if (!definitionsPayload.success) {
+    throw new Error(definitionsPayload.error || "failed to load local RAG bridge definitions");
+  }
+
+  const tools = definitionsPayload.tools ?? [];
   for (const tool of tools) {
     registry.registerTool(new PythonRagTool(config, tool));
   }
 
+  const watcher = config.autoSync && config.watch ? startIngestWatcher(config) : undefined;
   return {
     enabled: true,
-    knowledgeBase: initPayload.knowledge_base,
-    selectedDocuments: initPayload.selected_documents ?? [],
+    knowledgeBase: definitionsPayload.knowledge_base,
+    selectedDocuments: definitionsPayload.selected_documents ?? [],
     tools: tools.map((tool) => tool.function.name).sort(),
+    cleanup: watcher
+      ? () => {
+          watcher.kill("SIGTERM");
+        }
+      : undefined,
   };
+}
+
+function existingIndexAvailable(dbPath: string): boolean {
+  return existsSync(dbPath) && existsSync(`${dbPath}.manifest.json`);
 }
 
 class PythonRagTool implements RuntimeTool {
@@ -121,6 +132,18 @@ function bridgeArgs(config: RagConfig, args: string[]): string[] {
   return [config.bridgeScript, ...args];
 }
 
+function ingestArgs(config: RagConfig, args: string[]): string[] {
+  return [
+    config.ingestScript,
+    "--docs-dir",
+    config.docsDir,
+    "--db",
+    config.dbPath,
+    "--json",
+    ...args,
+  ];
+}
+
 function parseBridgeOutput(stdout: string, stderr: string): unknown {
   const trimmed = stdout.trim();
   if (!trimmed) {
@@ -135,10 +158,18 @@ function parseBridgeOutput(stdout: string, stderr: string): unknown {
 }
 
 function runBridgeSync(config: RagConfig, args: string[]): unknown {
+  return runPythonSync(config, bridgeArgs(config, args), "bridge");
+}
+
+function runIngestSync(config: RagConfig, args: string[]): unknown {
+  return runPythonSync(config, ingestArgs(config, args), "ingest");
+}
+
+function runPythonSync(config: RagConfig, args: string[], label: string): unknown {
   const command = splitCommand(config.pythonCommand);
   if (command.length === 0) throw new Error("RAG python command is empty");
   const [bin, ...prefixArgs] = command;
-  const result = spawnSync(bin, [...prefixArgs, ...bridgeArgs(config, args)], {
+  const result = spawnSync(bin, [...prefixArgs, ...args], {
     encoding: "utf8",
     cwd: resolve(dirname(config.bridgeScript), ".."),
     env: process.env,
@@ -147,13 +178,36 @@ function runBridgeSync(config: RagConfig, args: string[]): unknown {
   if (result.error) throw result.error;
   const payload = parseBridgeOutput(result.stdout || "", result.stderr || "");
   if (result.status !== 0) {
-    const bridgeError =
+    const pythonError =
       typeof payload === "object" && payload && "error" in payload
         ? String((payload as { error?: unknown }).error || "")
         : "";
-    throw new Error(bridgeError || result.stderr || `bridge exited with status ${result.status}`);
+    throw new Error(pythonError || result.stderr || `${label} exited with status ${result.status}`);
   }
   return payload;
+}
+
+function startIngestWatcher(config: RagConfig): ChildProcess {
+  const command = splitCommand(config.pythonCommand);
+  if (command.length === 0) throw new Error("RAG python command is empty");
+  const [bin, ...prefixArgs] = command;
+  return spawn(
+    bin,
+    [
+      ...prefixArgs,
+      ...ingestArgs(config, [
+        "--watch",
+        "--allow-empty",
+        "--watch-interval",
+        String(config.watchInterval),
+      ]),
+    ],
+    {
+      cwd: resolve(dirname(config.bridgeScript), ".."),
+      env: process.env,
+      stdio: "ignore",
+    },
+  );
 }
 
 function runBridgeAsync(

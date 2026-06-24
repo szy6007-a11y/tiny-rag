@@ -101,6 +101,7 @@ export class AgentTUI {
   private context: AgentContext;
   private ragEnabled = false;
   private registeredTools: string[] = [];
+  private ragCleanup?: () => void;
   private alternateScreenActive = false;
 
   constructor(private readonly runtime: RuntimeConfig) {
@@ -125,6 +126,7 @@ export class AgentTUI {
     const result = registerRagTools(this.toolRegistry, this.runtime.ragConfig);
     this.ragEnabled = result.enabled;
     this.registeredTools = result.tools;
+    this.ragCleanup = result.cleanup;
     if (result.knowledgeBase) {
       const existing = new Set(this.context.knowledge_bases.map((kb) => kb.id));
       if (!existing.has(result.knowledgeBase.id)) {
@@ -349,7 +351,7 @@ export class AgentTUI {
     process.stdout.write(color(1, truncateVisible(title, width)) + "\n");
     const modeLine = this.ragEnabled
       ? `RAG enabled: ${this.context.selected_documents.length} document(s). Commands: /help /quit`
-      : "Pure Agent core, no RAG tools. Pass --rag-document <file> to enable retrieval.";
+      : "Pure Agent core, no RAG tools. Add documents under ./knowledge to enable retrieval.";
     process.stdout.write(color(90, padRight(modeLine, width)) + "\n");
     process.stdout.write(color(90, "-".repeat(width)) + "\n");
 
@@ -421,7 +423,7 @@ export class AgentTUI {
       role: "system",
       content: this.ragEnabled
         ? `Started. History: ${this.runtime.historyPath}\nRAG tools registered: ${this.registeredTools.join(", ")}\nIndexed documents: ${this.context.selected_documents.map((doc) => doc.title || doc.file_name || doc.knowledge_id).join(", ")}`
-        : `Started. History: ${this.runtime.historyPath}\nNo RAG tools are registered. Pass --rag-document <file> to enable local retrieval.`,
+        : `Started. History: ${this.runtime.historyPath}\nNo RAG tools are registered. Add documents under ./knowledge to build the local index.`,
     });
     this.render();
   }
@@ -432,6 +434,8 @@ export class AgentTUI {
     process.off("exit", this.onProcessExit);
     process.off("SIGTERM", this.onSignal);
     process.off("SIGHUP", this.onSignal);
+    this.ragCleanup?.();
+    this.ragCleanup = undefined;
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     if (this.alternateScreenActive) {
       this.alternateScreenActive = false;

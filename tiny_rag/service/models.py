@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from tiny_rag.agent import AgentConfig, AgentState, Message
 from tiny_rag.chunking import SplitterConfig
-from tiny_rag.converting.models.document import Document
 from tiny_rag.indexing.models import (
     DEFAULT_RETRIEVER_TYPES,
     IndexKnowledgeStats,
@@ -15,6 +14,10 @@ from tiny_rag.indexing.models import (
 )
 from tiny_rag.persistence import PersistChunksResult
 from tiny_rag.retrieval import KnowledgeBaseRef, PipelineResult
+
+
+if TYPE_CHECKING:
+    from tiny_rag.converting.models.document import Document
 
 
 @dataclass(frozen=True)
@@ -57,10 +60,25 @@ class KnowledgeRecord:
     id: str
     knowledge_base_id: str
     tenant_id: int = 0
+    type: str = "file"
     title: str = ""
+    description: str = ""
     file_name: str = ""
     file_type: str = ""
+    file_size: int = 0
+    file_hash: str = ""
+    file_path: str = ""
     source: str = ""
+    channel: str = "web"
+    parse_status: str = "pending"
+    enable_status: str = "disabled"
+    embedding_model_id: str = ""
+    storage_size: int = 0
+    processed_at: str = ""
+    error_message: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    deleted_at: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -77,6 +95,9 @@ class IngestRequest:
     retriever_types: Sequence[str] | None = None
     knowledge_base: KnowledgeBaseConfig | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    source: str = ""
+    channel: str = "web"
+    force: bool = False
 
 
 @dataclass
@@ -86,6 +107,9 @@ class IngestResult:
     document: Document
     persist_result: PersistChunksResult
     index_stats: IndexKnowledgeStats
+    operation: str = "ingested"
+    skipped: bool = False
+    message: str = ""
 
 
 @dataclass(frozen=True)

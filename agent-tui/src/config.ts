@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import {
   DEFAULT_AGENT_MAX_ITERATIONS,
   DEFAULT_AGENT_TEMPERATURE,
@@ -7,7 +7,7 @@ import {
   type AgentConfig,
   type AgentContext,
 } from "./types.js";
-import { defaultBridgeScript, type RagConfig } from "./rag-tools.js";
+import { defaultBridgeScript, defaultIngestScript, type RagConfig } from "./rag-tools.js";
 
 export interface RuntimeConfig {
   apiKey: string;
@@ -21,8 +21,6 @@ export interface RuntimeConfig {
 }
 
 type ContextRagConfig = Partial<RagConfig> & {
-  document?: string | false;
-  documents?: string[] | false;
   enabled?: boolean;
 };
 
@@ -74,48 +72,12 @@ function argValue(args: string[], name: string): string | undefined {
   return hit ? hit.slice(prefix.length) : undefined;
 }
 
-function argValues(args: string[], name: string): string[] {
-  const out: string[] = [];
-  const prefix = `${name}=`;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === name && i + 1 < args.length) {
-      out.push(args[i + 1]);
-      i++;
-      continue;
-    }
-    if (arg.startsWith(prefix)) {
-      out.push(arg.slice(prefix.length));
-    }
-  }
-  return out;
-}
-
-function intArg(args: string[], name: string, envValue: string | undefined, fallback: number): number {
-  const raw = argValue(args, name) ?? envValue ?? "";
-  if (!raw) return fallback;
-  const parsed = Number.parseInt(raw, 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function splitEnvList(value: string | undefined): string[] {
-  if (!value) return [];
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function resolveFrom(baseDir: string, path: string): string {
-  return isAbsolute(path) ? path : resolve(baseDir, path);
-}
-
-function defaultKnowledgeDocument(): string {
-  return resolve(dirname(defaultBridgeScript()), "../agent-tui/examples/default_kb.md");
-}
-
 function isDisabled(value: string | undefined): boolean {
   return value?.trim().toLowerCase() === "1" || value?.trim().toLowerCase() === "true";
+}
+
+function defaultRepoRoot(): string {
+  return dirname(defaultIngestScript());
 }
 
 export function defaultAgentConfig(): AgentConfig {
@@ -150,7 +112,6 @@ export function loadRuntimeConfig(argv = process.argv.slice(2)): RuntimeConfig {
   const envPath = argValue(argv, "--env") ?? process.env.AGENT_TUI_ENV ?? resolveDefaultEnvPath();
   const fileEnv = envPath ? parseDotEnv(envPath) : {};
   const contextPath = argValue(argv, "--context") ?? process.env.AGENT_TUI_CONTEXT;
-  const contextDir = contextPath ? dirname(resolve(contextPath)) : process.cwd();
   const historyPath = resolve(argValue(argv, "--history") ?? process.env.AGENT_TUI_HISTORY ?? ".agent-tui-history.jsonl");
 
   const apiKey =
@@ -201,36 +162,39 @@ export function loadRuntimeConfig(argv = process.argv.slice(2)): RuntimeConfig {
     contextRag = loaded.rag ?? {};
   }
 
-  const contextDocs = [
-    ...(Array.isArray(contextRag.documents) ? contextRag.documents : []),
-    ...(typeof contextRag.document === "string" ? [contextRag.document] : []),
-  ];
-  const explicitRagDocuments = [
-    ...contextDocs.map((path) => resolveFrom(contextDir, path)),
-    ...splitEnvList(process.env.AGENT_TUI_RAG_DOCUMENTS).map((path) => resolve(path)),
-    ...argValues(argv, "--rag-document").map((path) => resolve(path)),
-    ...argValues(argv, "--rag-doc").map((path) => resolve(path)),
-  ];
   const ragDisabled =
     argv.includes("--no-rag") ||
     isDisabled(process.env.AGENT_TUI_NO_RAG) ||
-    contextRag.enabled === false ||
-    contextRag.documents === false ||
-    contextRag.document === false;
-  const ragDocuments = ragDisabled
-    ? []
-    : explicitRagDocuments.length > 0
-      ? explicitRagDocuments
-      : [defaultKnowledgeDocument()];
+    contextRag.enabled === false;
+  const ragSyncDisabled =
+    argv.includes("--no-rag-sync") ||
+    isDisabled(process.env.AGENT_TUI_NO_RAG_SYNC) ||
+    contextRag.autoSync === false;
+  const ragWatchDisabled =
+    argv.includes("--no-rag-watch") ||
+    isDisabled(process.env.AGENT_TUI_NO_RAG_WATCH) ||
+    contextRag.watch === false;
 
+  const repoRoot = defaultRepoRoot();
   const ragDbPath = resolve(
     argValue(argv, "--rag-db") ??
       process.env.AGENT_TUI_RAG_DB ??
       contextRag.dbPath ??
-      ".agent-tui-rag.sqlite",
+      resolve(repoRoot, ".agent-tui-rag.sqlite"),
+  );
+  const ragDocsDir = resolve(
+    argValue(argv, "--docs-dir") ??
+      process.env.AGENT_TUI_KNOWLEDGE_DIR ??
+      contextRag.docsDir ??
+      resolve(repoRoot, "knowledge"),
+  );
+  const ragWatchInterval = Number(
+    argValue(argv, "--rag-watch-interval") ??
+      process.env.AGENT_TUI_RAG_WATCH_INTERVAL ??
+      contextRag.watchInterval ??
+      1.5,
   );
   const ragConfig: RagConfig = {
-    documents: [...new Set(ragDocuments)],
     dbPath: ragDbPath,
     pythonCommand:
       argValue(argv, "--rag-python") ??
@@ -243,31 +207,17 @@ export function loadRuntimeConfig(argv = process.argv.slice(2)): RuntimeConfig {
         contextRag.bridgeScript ??
         defaultBridgeScript(),
     ),
-    tenantId: intArg(argv, "--rag-tenant-id", process.env.AGENT_TUI_RAG_TENANT_ID, contextRag.tenantId ?? 1),
-    knowledgeBaseId:
-      argValue(argv, "--rag-kb-id") ??
-      process.env.AGENT_TUI_RAG_KB_ID ??
-      contextRag.knowledgeBaseId ??
-      "local-tui-kb",
-    knowledgeBaseName:
-      argValue(argv, "--rag-kb-name") ??
-      process.env.AGENT_TUI_RAG_KB_NAME ??
-      contextRag.knowledgeBaseName ??
-      "Local TUI Knowledge Base",
-    chunkSize: intArg(argv, "--rag-chunk-size", process.env.AGENT_TUI_RAG_CHUNK_SIZE, contextRag.chunkSize ?? 512),
-    chunkOverlap: intArg(
-      argv,
-      "--rag-chunk-overlap",
-      process.env.AGENT_TUI_RAG_CHUNK_OVERLAP,
-      contextRag.chunkOverlap ?? 80,
+    ingestScript: resolve(
+      argValue(argv, "--rag-ingest") ??
+        process.env.AGENT_TUI_RAG_INGEST ??
+        contextRag.ingestScript ??
+        defaultIngestScript(),
     ),
-    embeddingDimensions: intArg(
-      argv,
-      "--rag-embedding-dimensions",
-      process.env.AGENT_TUI_RAG_EMBEDDING_DIMENSIONS,
-      contextRag.embeddingDimensions ?? 128,
-    ),
-    maxToolOutputChars: agentConfig.max_tool_output_chars ?? 16000,
+    docsDir: ragDocsDir,
+    enabled: !ragDisabled,
+    autoSync: !ragDisabled && !ragSyncDisabled,
+    watch: !ragDisabled && !ragSyncDisabled && !ragWatchDisabled,
+    watchInterval: Number.isFinite(ragWatchInterval) && ragWatchInterval > 0 ? ragWatchInterval : 1.5,
   };
 
   return {
@@ -293,17 +243,24 @@ Options:
   --base-url <url>    OpenAI-compatible base URL
   --api-key <key>     API key
   --env <file>        Load a tiny-rag .env file
-  --rag-document <f>  Use local document(s) instead of the default KB (repeatable)
-  --rag-db <file>     SQLite path for the local TUI RAG index
+  --rag-db <file>     SQLite path for an existing local TUI RAG index
   --rag-python <cmd>  Python runner for the bridge, default: "uv run python"
-  --no-rag            Start pure chat mode without the default KB
+  --docs-dir <dir>    Local knowledge directory, default: repo-root ./knowledge
+  --no-rag-sync       Do not sync repo-root ./knowledge on startup
+  --no-rag-watch      Do not watch repo-root ./knowledge while the TUI is running
+  --no-rag            Start pure chat mode without opening a local index
 
 Environment:
   LLM_API_KEY         Preferred default
   LLM_BASE_URL        Preferred default
   LLM_MODEL_NAME      Preferred default
   OPENAI_*            Fallbacks
-  AGENT_TUI_RAG_DOCUMENTS  Comma-separated local documents replacing the default KB
-  AGENT_TUI_NO_RAG         Set to true/1 to disable default RAG mode
+  AGENT_TUI_RAG_DB    Existing SQLite index path, default: repo-root .agent-tui-rag.sqlite
+  AGENT_TUI_KNOWLEDGE_DIR
+                      Knowledge directory, default: repo-root ./knowledge
+  AGENT_TUI_NO_RAG    Set to true/1 to disable local RAG tools
+
+Offline ingest:
+  Put documents under repo-root ./knowledge; the TUI syncs and watches it automatically.
 `;
 }

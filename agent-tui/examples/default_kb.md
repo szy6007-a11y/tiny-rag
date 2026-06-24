@@ -7,8 +7,8 @@ conversion, structure-aware chunking, SQLite persistence, hybrid retrieval,
 reranking, context merging, and an OpenAI-compatible function-calling Agent
 loop.
 
-The TypeScript TUI starts in Agent Q&A mode by default. On startup it indexes
-this default knowledge base and registers the core Python Tiny RAG tools:
+The TypeScript TUI starts in Agent Q&A mode by default. It opens an existing
+offline index and registers the core Python Tiny RAG tools:
 
 - `knowledge_search` for semantic retrieval
 - `grep_chunks` for exact keyword/regex lookup
@@ -38,10 +38,11 @@ uses the configured OpenAI-compatible LLM.
 
 ## Usage
 
-Start the TUI from `agent-tui/`:
+Put documents under the repository-root `knowledge/` directory, then start the
+TUI. The app syncs the directory on startup and keeps watching it while it runs:
 
 ```bash
-npm start
+npm run dev
 ```
 
 The app enters Agent Q&A mode immediately. You can ask questions such as:
@@ -50,5 +51,4 @@ The app enters Agent Q&A mode immediately. You can ask questions such as:
 - What is the local RAG pipeline?
 - Why does the TUI bridge not need a separate embedding API key?
 
-To bind your own documents, pass `--rag-document` one or more times. To start a
-pure conversational shell without RAG, pass `--no-rag`.
+To start a pure conversational shell without RAG, pass `--no-rag`.

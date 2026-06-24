@@ -1,0 +1,9 @@
+{
+  "name": "tiny-rag-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix agent-tui run dev --",
+    "ingest": "uv run python ingest.py"
+  }
+}

@@ -198,21 +198,19 @@ uv sync --group integration
 
 ## Agent TUI
 
-The TypeScript TUI lives in `agent-tui/`:
+Put local documents under `knowledge/`, then start the TypeScript TUI:
 
 ```bash
-cd agent-tui
-npm install
-npm run verify:prompts
-npm start
+npm run dev
 ```
 
 It supports streaming responses, thinking/answer separation, persisted local
-history, and generic function-calling execution. By default it indexes the
-bundled local KB and registers the user-facing `knowledge_search` and
-`grep_chunks` tools inside the TUI loop. Pass one or more `--rag-document`
-arguments to replace the default KB with your own local files, or `--no-rag` for
-pure chat mode.
+history, and generic function-calling execution. On startup the TUI syncs
+`knowledge/` into the local SQLite index, then watches the directory while it
+runs; added, changed, and deleted source documents are incrementally applied per
+document. Use `--no-rag-sync` to disable automatic sync, or `--no-rag` for pure
+chat mode. You can also run only the sync loop with `uv run python ingest.py
+--watch`.
 
 ## Project Layout
 
@@ -227,6 +225,7 @@ tiny_rag/
   retrieval/    # hybrid search, rerank, merge
   service/      # ingest/query/agent session services
 agent-tui/      # TypeScript terminal Agent shell
+ingest.py       # syncs knowledge/ into the TUI SQLite index + manifest
 scripts/        # demos, test runner, chunking preview
 tests/          # unit and integration coverage
 ```

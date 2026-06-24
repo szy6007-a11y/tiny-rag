@@ -503,16 +503,24 @@ Now generate the final answer:`,
     });
 
     let fullAnswer = "";
+    let answerDoneEmitted = false;
+    const emitAnswerDone = () => {
+      if (answerDoneEmitted) return;
+      answerDoneEmitted = true;
+      this.eventBus.emit("answer", { content: "", done: true });
+    };
+
     const result = await this.streamLLMToEventBus(messages, [], (chunk) => {
       if (chunk.response_type === "thinking") return;
       if (chunk.content) {
         fullAnswer += chunk.content;
         this.eventBus.emit("answer", { content: chunk.content, done: false });
       }
+      if (chunk.done) {
+        emitAnswerDone();
+      }
     });
-    if (!result.finishReason) {
-      this.eventBus.emit("answer", { content: "", done: true });
-    }
+    emitAnswerDone();
     state.final_answer = stripThinkBlocks(result.content || fullAnswer);
   }
 

@@ -195,20 +195,17 @@ uv sync --group integration
 
 ## Agent TUI
 
-TypeScript TUI 位于 `agent-tui/`：
+把本地文档放到 `knowledge/`，然后启动 TypeScript TUI：
 
 ```bash
-cd agent-tui
-npm install
-npm run verify:prompts
-npm start
+npm run dev
 ```
 
 它支持流式响应、thinking/answer 分离、本地历史和通用 function-calling 执行。
-默认启动时会索引内置本地 KB，并在 TypeScript Agent loop 内注册
-面向用户问答的 `knowledge_search` 和 `grep_chunks` 工具。传入一个或多个
-`--rag-document` 参数可以用自己的本地文件替换默认 KB；传 `--no-rag` 则进入
-纯聊天模式。
+TUI 启动时会自动同步 `knowledge/` 到本地 SQLite 索引，并在运行期间监听这个
+目录；新增、修改或删除原始文档都会按单文档增量更新。传 `--no-rag-sync`
+可以关闭自动同步，传 `--no-rag` 则进入纯聊天模式。也可以独立运行
+`uv run python ingest.py --watch` 来只启动知识库同步进程。
 
 ## 项目结构
 
@@ -223,6 +220,7 @@ tiny_rag/
   retrieval/    # hybrid search、rerank、merge
   service/      # ingest/query/agent session services
 agent-tui/      # TypeScript terminal Agent shell
+ingest.py       # 同步 knowledge/ 到 TUI SQLite 索引和 manifest 的命令
 scripts/        # demos、test runner、chunking preview
 tests/          # unit 和 integration 测试
 ```

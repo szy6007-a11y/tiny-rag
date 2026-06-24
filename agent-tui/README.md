@@ -2,10 +2,11 @@
 
 Standalone TypeScript TUI for the Agent core loop.
 
-This package is self-contained. By default it starts in Agent Q&A mode with a
-local knowledge base already bound. On startup it indexes the bundled default KB
-through the Python Tiny RAG stack and registers the core RAG tool in the
-TypeScript function-calling loop.
+This package is the online chat surface. It starts in Agent Q&A mode, opens an
+existing Tiny RAG SQLite index plus manifest, and registers the core RAG tools
+in the TypeScript function-calling loop. At startup it syncs the repository
+root `knowledge/` directory into that index, then watches for document changes
+while the TUI is running.
 
 - system prompt construction
 - runtime context block
@@ -24,6 +25,17 @@ prompts/agent_system_prompt.yaml
 
 ## Run
 
+From the repository root:
+
+```bash
+npm run dev
+```
+
+Place local documents under `knowledge/`. Adding, editing, or deleting a
+supported file while the TUI is running automatically updates the local index.
+
+From this package directly:
+
 ```bash
 cd agent-tui
 npm install
@@ -31,7 +43,8 @@ npm run verify:prompts
 npm start
 ```
 
-This opens the TUI with the default KB and the core RAG tool registered.
+This opens the TUI, syncs the root `knowledge/` directory, and registers RAG
+tools against `.agent-tui-rag.sqlite`.
 
 Optional context/history override:
 
@@ -39,20 +52,16 @@ Optional context/history override:
 npm start -- --context examples/context.json --history .agent-tui-history.jsonl
 ```
 
-Use your own local document(s) instead of the bundled default KB:
-
-```bash
-npm run dev -- \
-  --rag-document /path/to/manual.md
-```
-
-Repeat `--rag-document` to bind multiple local files. Startup rebuilds the
-local SQLite index at `.agent-tui-rag.sqlite` by default.
-
 Start pure chat mode without a KB:
 
 ```bash
 npm start -- --no-rag
+```
+
+Disable automatic knowledge-folder sync and use an already-built index:
+
+```bash
+npm start -- --no-rag-sync
 ```
 
 ## Environment
@@ -96,8 +105,8 @@ This checks:
 
 ## RAG Tool Mode
 
-By default, the TUI registers the core RAG tools that are wired through the
-Python service/tool registry:
+When RAG is enabled, the TUI registers the core RAG tools that are wired
+through the Python service/tool registry:
 
 - `knowledge_search`
 - `grep_chunks`
@@ -109,3 +118,8 @@ embedding or rerank API keys. `knowledge_search` handles semantic retrieval;
 Other Python-side helper tools such as `list_knowledge_chunks` and
 `get_document_info` remain available in the service layer until they are wired
 into the default TUI Agent surface.
+
+The TUI does not rebuild the whole knowledge base on every change. Its startup
+sync and watcher call the repository-root `ingest.py`, which keeps stable
+knowledge IDs, skips unchanged file hashes, and replaces only the changed
+document's chunks and indexes.

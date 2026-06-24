@@ -3,6 +3,15 @@
 from .agent import AgentService, QueryService, config_with_scope, default_rerank_service_from_env
 from .chat import ChatConfig, OpenAIChatModel, parse_chat_response
 from .ingest import IngestService, default_parser_factory
+from .knowledge_lifecycle import (
+    PARSE_STATUS_CANCELLED,
+    PARSE_STATUS_COMPLETED,
+    PARSE_STATUS_DELETING,
+    PARSE_STATUS_FAILED,
+    PARSE_STATUS_PENDING,
+    PARSE_STATUS_PROCESSING,
+    KnowledgeRepository,
+)
 from .models import (
     AgentQARequest,
     AgentQAResult,
@@ -25,8 +34,15 @@ __all__ = [
     "IngestResult",
     "IngestService",
     "KnowledgeBaseConfig",
+    "KnowledgeRepository",
     "KnowledgeRecord",
     "OpenAIChatModel",
+    "PARSE_STATUS_CANCELLED",
+    "PARSE_STATUS_COMPLETED",
+    "PARSE_STATUS_DELETING",
+    "PARSE_STATUS_FAILED",
+    "PARSE_STATUS_PENDING",
+    "PARSE_STATUS_PROCESSING",
     "QueryRequest",
     "QueryResult",
     "QueryService",
