@@ -1,4 +1,4 @@
-import readline from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import { AgentEngine } from "./engine.js";
 import { AgentEventBus } from "./events.js";
 import { appendHistory, clearHistory, loadHistory } from "./history.js";
@@ -15,6 +15,24 @@ interface TranscriptItem {
   content: string;
 }
 
+interface TranscriptViewport {
+  lines: string[];
+  totalLines: number;
+  scrollTop: number;
+  maxScrollTop: number;
+}
+
+interface TranscriptRender {
+  lines: string[];
+  itemStartLines: number[];
+}
+
+interface TerminalLayout {
+  width: number;
+  height: number;
+  bodyHeight: number;
+}
+
 const ESC = "\x1b[";
 
 function enterAlternateScreen(): void {
@@ -23,6 +41,14 @@ function enterAlternateScreen(): void {
 
 function leaveAlternateScreen(): void {
   process.stdout.write(`${ESC}?25h${ESC}?1049l`);
+}
+
+function enableMouseReporting(): void {
+  process.stdout.write(`${ESC}?1000h${ESC}?1006h`);
+}
+
+function disableMouseReporting(): void {
+  process.stdout.write(`${ESC}?1000l${ESC}?1002l${ESC}?1003l${ESC}?1006l`);
 }
 
 function clearScreen(): void {
@@ -103,6 +129,11 @@ export class AgentTUI {
   private registeredTools: string[] = [];
   private ragCleanup?: () => void;
   private alternateScreenActive = false;
+  private transcriptScrollTop = 0;
+  private transcriptStickToBottom = true;
+  private pendingScrollToTranscriptIndex: number | null = null;
+  private readonly stdinDecoder = new StringDecoder("utf8");
+  private pendingInputBytes = "";
 
   constructor(private readonly runtime: RuntimeConfig) {
     this.chatClient = new OpenAICompatibleChatClient({
@@ -168,6 +199,9 @@ export class AgentTUI {
 
     this.eventBus.on("answer", ({ content, done }) => {
       if (done) {
+        if (this.currentAssistantIndex != null && this.transcriptStickToBottom) {
+          this.pendingScrollToTranscriptIndex = this.currentAssistantIndex;
+        }
         this.currentAssistantIndex = null;
         this.render();
         return;
@@ -232,17 +266,106 @@ export class AgentTUI {
     }
   }
 
-  private renderTranscript(width: number, height: number): string[] {
+  private currentLayout(): TerminalLayout {
+    const width = process.stdout.columns || 100;
+    const height = process.stdout.rows || 30;
+    const headerHeight = 3;
+    const footerHeight = 3;
+    return {
+      width,
+      height,
+      bodyHeight: Math.max(5, height - headerHeight - footerHeight),
+    };
+  }
+
+  private buildTranscript(width: number): TranscriptRender {
     const bodyWidth = Math.max(20, width - 4);
-    const rendered: string[] = [];
+    const lines: string[] = [];
+    const itemStartLines: number[] = [];
     for (const item of this.transcript) {
+      itemStartLines.push(lines.length);
       const label = this.roleLabel(item.role);
       const wrapped = wrapText(item.content || " ", bodyWidth - 10);
-      rendered.push(`${label}: ${wrapped[0] ?? ""}`);
-      for (const line of wrapped.slice(1)) rendered.push(`          ${line}`);
-      rendered.push("");
+      lines.push(`${label}: ${wrapped[0] ?? ""}`);
+      for (const line of wrapped.slice(1)) lines.push(`          ${line}`);
+      lines.push("");
     }
-    return rendered.slice(-height);
+    return { lines, itemStartLines };
+  }
+
+  private buildTranscriptLines(width: number): string[] {
+    return this.buildTranscript(width).lines;
+  }
+
+  private renderTranscript(width: number, height: number): TranscriptViewport {
+    const rendered = this.buildTranscript(width);
+    const lines = rendered.lines;
+    const maxScrollTop = Math.max(0, lines.length - height);
+    if (this.pendingScrollToTranscriptIndex != null) {
+      const requestedTop = rendered.itemStartLines[this.pendingScrollToTranscriptIndex] ?? maxScrollTop;
+      this.transcriptScrollTop = Math.max(0, Math.min(requestedTop, maxScrollTop));
+      this.transcriptStickToBottom = this.transcriptScrollTop >= maxScrollTop;
+      this.pendingScrollToTranscriptIndex = null;
+    } else if (this.transcriptStickToBottom) {
+      this.transcriptScrollTop = maxScrollTop;
+    } else {
+      this.transcriptScrollTop = Math.max(0, Math.min(this.transcriptScrollTop, maxScrollTop));
+      if (this.transcriptScrollTop >= maxScrollTop) {
+        this.transcriptStickToBottom = true;
+      }
+    }
+    return {
+      lines: lines.slice(this.transcriptScrollTop, this.transcriptScrollTop + height),
+      totalLines: lines.length,
+      scrollTop: this.transcriptScrollTop,
+      maxScrollTop,
+    };
+  }
+
+  private scrollTranscript(delta: number): void {
+    const { width, bodyHeight } = this.currentLayout();
+    const maxScrollTop = Math.max(0, this.buildTranscriptLines(width).length - bodyHeight);
+    if (maxScrollTop <= 0) {
+      this.transcriptScrollTop = 0;
+      this.transcriptStickToBottom = true;
+      this.render();
+      return;
+    }
+
+    const currentTop = this.transcriptStickToBottom ? maxScrollTop : this.transcriptScrollTop;
+    this.transcriptScrollTop = Math.max(0, Math.min(currentTop + delta, maxScrollTop));
+    this.transcriptStickToBottom = this.transcriptScrollTop >= maxScrollTop;
+    this.render();
+  }
+
+  private scrollTranscriptPage(direction: -1 | 1): void {
+    this.scrollTranscript(direction * Math.max(1, this.currentLayout().bodyHeight - 1));
+  }
+
+  private jumpTranscriptTop(): void {
+    this.transcriptScrollTop = 0;
+    this.transcriptStickToBottom = false;
+    this.render();
+  }
+
+  private jumpTranscriptBottom(): void {
+    this.transcriptStickToBottom = true;
+    this.render();
+  }
+
+  private scrollHelp(viewport: TranscriptViewport, bodyHeight: number): string {
+    if (viewport.totalLines <= bodyHeight) {
+      return "Enter send | Ctrl+C quit";
+    }
+    const visibleStart = viewport.scrollTop + 1;
+    const visibleEnd = Math.min(viewport.scrollTop + bodyHeight, viewport.totalLines);
+    const location =
+      viewport.scrollTop <= 0
+        ? "top"
+        : viewport.scrollTop >= viewport.maxScrollTop
+          ? "bottom"
+          : `${visibleStart}-${visibleEnd}/${viewport.totalLines}`;
+    return `Enter send | Mouse wheel or Up/Down scroll | PgUp/PgDn page | ${location}`;
   }
 
   private commandHelp(): string {
@@ -252,6 +375,10 @@ export class AgentTUI {
       "/clear-history        clear persisted history",
       "/model                show current model config",
       "/context              show current context summary",
+      "Mouse wheel           scroll transcript",
+      "Up/Down               scroll transcript one line",
+      "PageUp/PageDown       scroll transcript one page",
+      "Home/End              jump transcript top/bottom",
       "/quit                 exit",
     ].join("\n");
   }
@@ -264,6 +391,9 @@ export class AgentTUI {
         break;
       case "/clear":
         this.transcript.length = 0;
+        this.transcriptScrollTop = 0;
+        this.transcriptStickToBottom = true;
+        this.pendingScrollToTranscriptIndex = null;
         break;
       case "/clear-history":
         clearHistory(this.runtime.historyPath);
@@ -289,6 +419,8 @@ export class AgentTUI {
       default:
         this.transcript.push({ role: "error", content: `Unknown command: ${cmd}` });
     }
+    this.transcriptStickToBottom = true;
+    this.pendingScrollToTranscriptIndex = null;
     this.render();
   }
 
@@ -308,6 +440,8 @@ export class AgentTUI {
     this.currentAssistantIndex = null;
     this.currentThoughtIndex = null;
     this.transcript.push({ role: "user", content: query });
+    this.transcriptStickToBottom = true;
+    this.pendingScrollToTranscriptIndex = null;
     this.render();
 
     const contextForTurn: AgentContext = {
@@ -340,11 +474,7 @@ export class AgentTUI {
 
   private render(): void {
     if (this.closed) return;
-    const width = process.stdout.columns || 100;
-    const height = process.stdout.rows || 30;
-    const headerHeight = 3;
-    const footerHeight = 3;
-    const bodyHeight = Math.max(5, height - headerHeight - footerHeight);
+    const { width, bodyHeight } = this.currentLayout();
 
     clearScreen();
     const title = ` Tiny RAG Agent TUI | model ${this.runtime.model} | tools ${this.registeredTools.length} | ${this.busy ? "running" : "ready"} `;
@@ -355,7 +485,8 @@ export class AgentTUI {
     process.stdout.write(color(90, padRight(modeLine, width)) + "\n");
     process.stdout.write(color(90, "-".repeat(width)) + "\n");
 
-    const lines = this.renderTranscript(width, bodyHeight);
+    const viewport = this.renderTranscript(width, bodyHeight);
+    const lines = viewport.lines;
     for (let i = 0; i < bodyHeight; i++) {
       process.stdout.write(padRight(lines[i] ?? "", width) + "\n");
     }
@@ -364,33 +495,148 @@ export class AgentTUI {
     const prompt = this.busy ? color(90, "waiting> ") : color(36, "you> ");
     const inputLine = truncateVisible(this.input, Math.max(1, width - visibleLength(stripAnsi(prompt)) - 1));
     process.stdout.write(prompt + inputLine + "\n");
-    process.stdout.write(color(90, "Enter send | Ctrl+C quit") + "\n");
+    process.stdout.write(color(90, truncateVisible(this.scrollHelp(viewport, bodyHeight), width)) + "\n");
   }
 
-  private onKeypress = async (str: string, key: readline.Key) => {
-    if (key.ctrl && key.name === "c") {
-      this.close();
-      return;
+  private handleStdinData = async (chunk: Buffer | string) => {
+    this.pendingInputBytes += typeof chunk === "string" ? chunk : this.stdinDecoder.write(chunk);
+    let shouldRender = false;
+
+    for (;;) {
+      const token = this.consumeInputToken();
+      if (token === "incomplete") break;
+      if (token === "close") return;
+      if (token === "submit") {
+        if (shouldRender) {
+          this.render();
+          shouldRender = false;
+        }
+        await this.submitInput();
+        continue;
+      }
+      if (token === "render") {
+        shouldRender = true;
+      }
     }
-    if (key.name === "return") {
-      await this.submitInput();
-      return;
-    }
-    if (key.name === "backspace") {
-      this.input = Array.from(this.input).slice(0, -1).join("");
-      this.render();
-      return;
-    }
-    if (key.name === "escape") {
-      this.input = "";
-      this.render();
-      return;
-    }
-    if (str && !key.ctrl && !key.meta && key.name !== "up" && key.name !== "down" && key.name !== "left" && key.name !== "right") {
-      this.input += str;
-      this.render();
-    }
+
+    if (shouldRender) this.render();
   };
+
+  private consumeInputToken(): "render" | "submit" | "close" | "incomplete" | "none" {
+    const input = this.pendingInputBytes;
+    if (!input) return "incomplete";
+
+    const consume = (length: number) => {
+      this.pendingInputBytes = this.pendingInputBytes.slice(length);
+    };
+
+    const consumeRender = (length: number): "render" => {
+      consume(length);
+      return "render";
+    };
+
+    if (input.startsWith("\x03")) {
+      consume(1);
+      this.close();
+      return "close";
+    }
+    if (input.startsWith("\r") || input.startsWith("\n")) {
+      consume(1);
+      return "submit";
+    }
+    if (input.startsWith("\x7f") || input.startsWith("\b")) {
+      this.input = Array.from(this.input).slice(0, -1).join("");
+      return consumeRender(1);
+    }
+
+    const sgrMouse = input.match(/^\x1b\[<(\d+);(\d+);(\d+)([mM])/);
+    if (sgrMouse) {
+      this.handleMouseButtonCode(Number(sgrMouse[1]));
+      return consumeRender(sgrMouse[0].length);
+    }
+    if (input.startsWith("\x1b[M")) {
+      if (input.length < 6) return "incomplete";
+      this.handleMouseButtonCode(input.charCodeAt(3) - 32);
+      return consumeRender(6);
+    }
+
+    const escapeActions: Array<[string, () => void]> = [
+      ["\x1b[A", () => this.scrollTranscriptWithoutRender(-1)],
+      ["\x1b[B", () => this.scrollTranscriptWithoutRender(1)],
+      ["\x1b[5~", () => this.scrollTranscriptPageWithoutRender(-1)],
+      ["\x1b[6~", () => this.scrollTranscriptPageWithoutRender(1)],
+      ["\x1b[H", () => this.jumpTranscriptTopWithoutRender()],
+      ["\x1b[1~", () => this.jumpTranscriptTopWithoutRender()],
+      ["\x1bOH", () => this.jumpTranscriptTopWithoutRender()],
+      ["\x1b[F", () => this.jumpTranscriptBottomWithoutRender()],
+      ["\x1b[4~", () => this.jumpTranscriptBottomWithoutRender()],
+      ["\x1bOF", () => this.jumpTranscriptBottomWithoutRender()],
+    ];
+    for (const [sequence, action] of escapeActions) {
+      if (input.startsWith(sequence)) {
+        action();
+        return consumeRender(sequence.length);
+      }
+    }
+    if (this.isPotentialEscapePrefix(input)) {
+      return "incomplete";
+    }
+    if (input.startsWith("\x1b")) {
+      this.input = "";
+      return consumeRender(1);
+    }
+
+    const [ch] = Array.from(input);
+    if (!ch) return "incomplete";
+    consume(ch.length);
+    if (ch >= " " && ch !== "\x7f") {
+      this.input += ch;
+      return "render";
+    }
+    return "none";
+  }
+
+  private isPotentialEscapePrefix(input: string): boolean {
+    if (input === "\x1b[" || input === "\x1b[<" || input === "\x1b[M" || input === "\x1bO") {
+      return true;
+    }
+    return /^\x1b\[<\d*(?:;\d*){0,2}$/.test(input);
+  }
+
+  private handleMouseButtonCode(buttonCode: number): boolean {
+    if ((buttonCode & 64) === 0) return false;
+    const direction = (buttonCode & 1) === 0 ? -1 : 1;
+    const step = Math.max(3, Math.floor(this.currentLayout().bodyHeight / 4));
+    this.scrollTranscriptWithoutRender(direction * step);
+    return true;
+  }
+
+  private scrollTranscriptWithoutRender(delta: number): void {
+    const { width, bodyHeight } = this.currentLayout();
+    const maxScrollTop = Math.max(0, this.buildTranscriptLines(width).length - bodyHeight);
+    if (maxScrollTop <= 0) {
+      this.transcriptScrollTop = 0;
+      this.transcriptStickToBottom = true;
+      return;
+    }
+
+    const currentTop = this.transcriptStickToBottom ? maxScrollTop : this.transcriptScrollTop;
+    this.transcriptScrollTop = Math.max(0, Math.min(currentTop + delta, maxScrollTop));
+    this.transcriptStickToBottom = this.transcriptScrollTop >= maxScrollTop;
+  }
+
+  private scrollTranscriptPageWithoutRender(direction: -1 | 1): void {
+    this.scrollTranscriptWithoutRender(direction * Math.max(1, this.currentLayout().bodyHeight - 1));
+  }
+
+  private jumpTranscriptTopWithoutRender(): void {
+    this.transcriptScrollTop = 0;
+    this.transcriptStickToBottom = false;
+  }
+
+  private jumpTranscriptBottomWithoutRender(): void {
+    this.transcriptStickToBottom = true;
+  }
 
   private onResize = () => {
     this.render();
@@ -411,10 +657,10 @@ export class AgentTUI {
 
     enterAlternateScreen();
     this.alternateScreenActive = true;
-    readline.emitKeypressEvents(process.stdin);
+    enableMouseReporting();
     process.stdin.setRawMode(true);
     process.stdin.resume();
-    process.stdin.on("keypress", this.onKeypress);
+    process.stdin.on("data", this.handleStdinData);
     process.stdout.on("resize", this.onResize);
     process.once("exit", this.onProcessExit);
     process.once("SIGTERM", this.onSignal);
@@ -429,13 +675,14 @@ export class AgentTUI {
   }
 
   private restoreTerminal(): void {
-    process.stdin.off("keypress", this.onKeypress);
+    process.stdin.off("data", this.handleStdinData);
     process.stdout.off("resize", this.onResize);
     process.off("exit", this.onProcessExit);
     process.off("SIGTERM", this.onSignal);
     process.off("SIGHUP", this.onSignal);
     this.ragCleanup?.();
     this.ragCleanup = undefined;
+    disableMouseReporting();
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     if (this.alternateScreenActive) {
       this.alternateScreenActive = false;

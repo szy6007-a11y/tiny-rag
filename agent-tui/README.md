@@ -103,6 +103,11 @@ This checks:
 /quit
 ```
 
+Long transcript output can be reviewed with the mouse wheel, `Up`/`Down`,
+`PageUp`/`PageDown`, `Home`, and `End`. When a long assistant response
+finishes, the viewport jumps to the start of that response so the first half is
+immediately readable.
+
 ## RAG Tool Mode
 
 When RAG is enabled, the TUI registers the core RAG tools that are wired
